@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
-ABI_VERSION = 2
+ABI_VERSION = 3
 OK = 0
 
 
@@ -31,6 +31,7 @@ class SolverDesc(ctypes.Structure):
         ("minimum_line_search_step", ctypes.c_double),
         ("minimum_gap", ctypes.c_double),
         ("maximum_element_length", ctypes.c_double),
+        ("minimum_dynamic_length", ctypes.c_double),
         ("fixed_root_nodes", ctypes.c_uint32),
         ("thread_count", ctypes.c_uint32),
     ]
@@ -69,6 +70,9 @@ class BuildStats(ctypes.Structure):
         ("collider_inconsistent_edge_count", ctypes.c_uint32),
         ("collider_inverted_closed_component_count", ctypes.c_uint32),
         ("merged_zero_length_segment_count", ctypes.c_uint32),
+        ("virtual_extension_strand_count", ctypes.c_uint32),
+        ("virtual_extension_node_count", ctypes.c_uint32),
+        ("virtual_extension_rest_length", ctypes.c_double),
         ("degree_of_freedom_count", ctypes.c_uint64),
         ("estimated_bytes", ctypes.c_uint64),
         ("initial_minimum_gap", ctypes.c_double),

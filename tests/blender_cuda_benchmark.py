@@ -14,6 +14,8 @@ def arguments():
     parser.add_argument("--frame-end", type=int, default=2)
     parser.add_argument("--iterations", type=int, default=24)
     parser.add_argument("--substeps", type=int, default=8)
+    parser.add_argument("--maximum-element-length", type=float, default=0.01)
+    parser.add_argument("--minimum-dynamic-length", type=float, default=0.0)
     parser.add_argument("--friction", type=float, default=0.35)
     parser.add_argument("--contact-stiffness", type=float, default=1.0e4)
     parser.add_argument("--barrier-distance", type=float, default=2.0e-4)
@@ -35,7 +37,8 @@ def main():
     settings.collider = bpy.data.objects["CC_Base_Body"]
     settings.frame_start = 1
     settings.frame_end = args.frame_end
-    settings.maximum_element_length = 0.01
+    settings.maximum_element_length = args.maximum_element_length
+    settings.minimum_dynamic_length = args.minimum_dynamic_length
     settings.fixed_root_nodes = 2
     settings.substeps = args.substeps
     settings.newton_iterations = args.iterations
@@ -101,6 +104,9 @@ def main():
         "strands": stats.strand_count,
         "nodes": stats.internal_node_count,
         "elements": stats.element_count,
+        "virtual_extension_strands": stats.virtual_extension_strand_count,
+        "virtual_extension_nodes": stats.virtual_extension_node_count,
+        "virtual_extension_rest_length": stats.virtual_extension_rest_length,
         "resident_gib": gpu_before.resident_bytes / (1024.0 ** 3),
         "iterations": step.newton_iterations if step else 0,
         "linear_solves": step.linear_solves if step else 0,

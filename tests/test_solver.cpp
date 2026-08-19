@@ -49,6 +49,116 @@ void test_rest_state_and_subdivision()
     khsDestroy(solver);
 }
 
+void test_minimum_dynamic_length_preserves_visible_prefix()
+{
+    KhsSolverDesc desc;
+    khsDefaultSolverDesc(&desc);
+    desc.gravity = {0.0, 0.0, 0.0};
+    desc.substeps = 1;
+    desc.fixed_root_nodes = 1;
+    desc.maximum_element_length = 0.06;
+    desc.minimum_dynamic_length = 0.30;
+    KhsSolver *solver = khsCreate(&desc);
+    assert(solver);
+    KhsHairMaterial material;
+    khsDefaultHairMaterial(&material);
+    material.mass_damping = 0.0;
+    const KhsVec3 points[]{{0.0, 0.0, 0.0}, {0.05, 0.0, 0.0}, {0.10, 0.0, 0.0}};
+    const uint32_t offsets[]{0, 3};
+    require(solver, khsSetHairCurves(solver, points, 3, offsets, 1, &material));
+    require(solver, khsBuild(solver));
+
+    KhsBuildStats build{};
+    build.struct_size = sizeof(build);
+    require(solver, khsGetBuildStats(solver, &build));
+    assert(build.original_point_count == 3);
+    assert(build.internal_node_count == 7);
+    assert(build.element_count == 6);
+    assert(build.virtual_extension_strand_count == 1);
+    assert(build.virtual_extension_node_count == 4);
+    assert(std::abs(build.virtual_extension_rest_length - 0.20) < 1.0e-12);
+
+    std::vector<KhsVec3> internal(build.internal_node_count);
+    require(solver, khsCopyInternalPositions(
+        solver, internal.data(), static_cast<uint32_t>(internal.size())));
+    assert(std::abs(internal.back().x - 0.30) < 1.0e-12);
+    assert(std::abs(internal.back().y) < 1.0e-12);
+    assert(std::abs(internal.back().z) < 1.0e-12);
+
+    require(solver, khsStep(solver, 1.0 / 24.0));
+    KhsVec3 output[3];
+    require(solver, khsCopyOriginalPositions(solver, output, 3));
+    for (int i = 0; i < 3; ++i) {
+        assert(std::abs(output[i].x - points[i].x) < 1.0e-10);
+        assert(std::abs(output[i].y - points[i].y) < 1.0e-10);
+        assert(std::abs(output[i].z - points[i].z) < 1.0e-10);
+    }
+    khsDestroy(solver);
+}
+
+void test_virtual_extension_ignores_collider_contact()
+{
+    KhsSolverDesc desc;
+    khsDefaultSolverDesc(&desc);
+    desc.gravity = {0.0, 0.0, 0.0};
+    desc.substeps = 1;
+    desc.fixed_root_nodes = 1;
+    desc.maximum_element_length = 0.05;
+    desc.minimum_dynamic_length = 0.30;
+    KhsHairMaterial material;
+    khsDefaultHairMaterial(&material);
+    material.mass_damping = 0.0;
+    const KhsVec3 points[]{{0.0, 0.0, 0.0}, {0.05, 0.0, 0.0}};
+    const uint32_t offsets[]{0, 2};
+    const KhsTriangle triangle[]{0, 1, 2};
+
+    // The static triangle intersects only the invisible extension. Building
+    // must still succeed, while visible-hair intersection tests remain active.
+    {
+        KhsSolver *solver = khsCreate(&desc);
+        assert(solver);
+        const KhsVec3 collider[]{{0.10, -1.0, 0.0}, {0.40, -1.0, 0.0},
+                                 {0.25, 1.0, 0.0}};
+        require(solver, khsSetHairCurves(solver, points, 2, offsets, 1, &material));
+        require(solver, khsSetColliderMesh(solver, collider, 3, triangle, 1));
+        require(solver, khsBuild(solver));
+        KhsBuildStats build{};
+        build.struct_size = sizeof(build);
+        require(solver, khsGetBuildStats(solver, &build));
+        assert(build.virtual_extension_strand_count == 1);
+        assert(std::isinf(build.initial_minimum_gap));
+        require(solver, khsStep(solver, 1.0 / 24.0));
+        KhsStepStats step{};
+        step.struct_size = sizeof(step);
+        require(solver, khsGetLastStepStats(solver, &step));
+        assert(step.contact_candidate_count == 0);
+        assert(step.active_contact_count == 0);
+        khsDestroy(solver);
+    }
+
+    // A moving triangle sweeps through only the invisible extension. It must
+    // not trigger animated-collider crossing or generate contact candidates.
+    {
+        KhsSolver *solver = khsCreate(&desc);
+        assert(solver);
+        const KhsVec3 below[]{{0.10, -1.0, -0.1}, {0.40, -1.0, -0.1},
+                              {0.25, 1.0, -0.1}};
+        const KhsVec3 above[]{{0.10, -1.0, 0.1}, {0.40, -1.0, 0.1},
+                              {0.25, 1.0, 0.1}};
+        require(solver, khsSetHairCurves(solver, points, 2, offsets, 1, &material));
+        require(solver, khsSetColliderMesh(solver, below, 3, triangle, 1));
+        require(solver, khsBuild(solver));
+        require(solver, khsUpdateColliderVertices(solver, above, 3));
+        require(solver, khsStep(solver, 1.0 / 24.0));
+        KhsStepStats step{};
+        step.struct_size = sizeof(step);
+        require(solver, khsGetLastStepStats(solver, &step));
+        assert(step.contact_candidate_count == 0);
+        assert(step.active_contact_count == 0);
+        khsDestroy(solver);
+    }
+}
+
 void test_duplicate_mapping()
 {
     KhsSolverDesc desc;
@@ -198,6 +308,8 @@ int main()
 {
     assert(khsGetAbiVersion() == KHS_ABI_VERSION);
     test_rest_state_and_subdivision();
+    test_minimum_dynamic_length_preserves_visible_prefix();
+    test_virtual_extension_ignores_collider_contact();
     test_duplicate_mapping();
     test_initial_intersection_rejected();
     test_barrier_contact_remains_feasible();

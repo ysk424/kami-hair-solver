@@ -64,7 +64,8 @@ def main():
     settings.frame_end = 2
     settings.substeps = 8
     settings.newton_iterations = 24
-    settings.maximum_element_length = 0.02
+    settings.maximum_element_length = 0.021
+    settings.minimum_dynamic_length = 0.10
     settings.fixed_root_nodes = 2
     settings.young_modulus = 1.0e7
     settings.cache_path = str(stage.parent / "髪_試験キャッシュ.khc")
@@ -81,6 +82,9 @@ def main():
     stats = addon.prepare_scene(scene)
     assert stats.strand_count == 1
     assert stats.original_point_count == 5
+    assert stats.virtual_extension_strand_count == 1
+    assert stats.virtual_extension_node_count == 3
+    assert abs(stats.virtual_extension_rest_length - 0.06) < 1.0e-6
     assert settings.result is not hair
     assert settings.result.name.startswith("髪_計算結果")
     try:

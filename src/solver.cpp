@@ -128,6 +128,9 @@ void Solver::clear_built_data()
     root_rotation_current_.clear();
     root_rotation_pending_.clear();
     merged_segments_ = 0;
+    virtual_extension_strands_ = 0;
+    virtual_extension_nodes_ = 0;
+    virtual_extension_rest_length_ = 0.0;
 }
 
 KhsResult Solver::set_hair(const KhsVec3 *points, uint32_t point_count,
@@ -229,6 +232,9 @@ bool Solver::make_internal_mesh()
     original_to_internal_.assign(input_points_.size(), 0);
     const double hmax = desc_.maximum_element_length;
     const double zero_tolerance = 1.0e-12;
+    virtual_extension_strands_ = 0;
+    virtual_extension_nodes_ = 0;
+    virtual_extension_rest_length_ = 0.0;
     for (uint32_t s = 0; s + 1 < input_offsets_.size(); ++s) {
         const uint32_t begin = input_offsets_[s];
         const uint32_t end = input_offsets_[s + 1];
@@ -241,6 +247,11 @@ bool Solver::make_internal_mesh()
         original_to_internal_[begin] = static_cast<uint32_t>(nodes_.size() - 1);
         Vec3 previous = input_points_[begin];
         uint32_t unique_segments = 0;
+        double strand_rest_length = 0.0;
+        uint32_t terminal_left = begin;
+        uint32_t terminal_right = begin;
+        double terminal_segment_length = 0.0;
+        Vec3 terminal_direction = Vec3::Zero();
         for (uint32_t p = begin + 1; p < end; ++p) {
             const Vec3 target = input_points_[p];
             const double length = (target - previous).norm();
@@ -263,6 +274,11 @@ bool Solver::make_internal_mesh()
             }
             original_to_internal_[p] = strand_nodes_[s].back();
             previous = target;
+            strand_rest_length += length;
+            terminal_left = p - 1;
+            terminal_right = p;
+            terminal_segment_length = length;
+            terminal_direction = (target - input_points_[p - 1]) / length;
             ++unique_segments;
         }
         if (unique_segments == 0 || strand_nodes_[s].size() < 2) {
@@ -271,6 +287,28 @@ bool Solver::make_internal_mesh()
                << begin << "〜" << (end - 1) << "）。";
             error_ = ss.str();
             return false;
+        }
+        if (desc_.minimum_dynamic_length > strand_rest_length + zero_tolerance) {
+            const double extension_length = desc_.minimum_dynamic_length - strand_rest_length;
+            const uint32_t divisions = std::max(
+                1u, static_cast<uint32_t>(std::ceil(extension_length / hmax)));
+            const Vec3 tip = input_points_[end - 1];
+            for (uint32_t d = 1; d <= divisions; ++d) {
+                const double distance = extension_length * static_cast<double>(d) / divisions;
+                Node node;
+                node.x = tip + distance * terminal_direction;
+                node.strand = s;
+                node.virtual_extension = true;
+                node.binding = {
+                    terminal_left,
+                    terminal_right,
+                    1.0 + distance / terminal_segment_length};
+                nodes_.push_back(node);
+                strand_nodes_[s].push_back(static_cast<uint32_t>(nodes_.size() - 1));
+            }
+            ++virtual_extension_strands_;
+            virtual_extension_nodes_ += divisions;
+            virtual_extension_rest_length_ += extension_length;
         }
         const uint32_t fixed_count = std::min<uint32_t>(
             desc_.fixed_root_nodes, static_cast<uint32_t>(strand_nodes_[s].size()));
@@ -304,6 +342,7 @@ void Solver::initialize_frames_and_elements()
             e.i = indices[k];
             e.j = indices[k + 1];
             e.strand = s;
+            e.collider_contact = !nodes_[e.j].virtual_extension;
             e.rest_length = (nodes_[e.j].x - nodes_[e.i].x).norm();
             const Mat3 &ri = nodes_[e.i].reference_frame;
             const Mat3 &rj = nodes_[e.j].reference_frame;
@@ -465,7 +504,8 @@ KhsResult Solver::build()
     std::vector<CudaElementInit> cuda_elements(elements_.size());
     for (size_t i = 0; i < elements_.size(); ++i) {
         const Element &source = elements_[i];
-        cuda_elements[i] = {source.i, source.j, source.strand, source.rest_length,
+        cuda_elements[i] = {source.i, source.j, source.strand,
+                            source.collider_contact ? 1u : 0u, source.rest_length,
                             to_c(source.rest_shear), to_c(source.rest_curvature)};
     }
     std::vector<KhsVec3> cuda_collider(collider_current_.size());
@@ -501,6 +541,9 @@ KhsResult Solver::build()
     build_stats_.collider_inconsistent_edge_count = inconsistent_edges_;
     build_stats_.collider_inverted_closed_component_count = inverted_closed_components_;
     build_stats_.merged_zero_length_segment_count = merged_segments_;
+    build_stats_.virtual_extension_strand_count = virtual_extension_strands_;
+    build_stats_.virtual_extension_node_count = virtual_extension_nodes_;
+    build_stats_.virtual_extension_rest_length = virtual_extension_rest_length_;
     build_stats_.degree_of_freedom_count = free_dof_count_;
     build_stats_.estimated_bytes =
         nodes_.size() * sizeof(Node) + elements_.size() * sizeof(Element) +
@@ -542,7 +585,7 @@ bool Solver::initial_feasibility_check()
 {
     if (collider_closed_manifold_) {
         for (uint32_t n = 0; n < nodes_.size(); ++n) {
-            if (nodes_[n].fixed) continue;
+            if (nodes_[n].fixed || nodes_[n].virtual_extension) continue;
             if (point_inside_closed_collider(nodes_[n].x)) {
                 std::ostringstream ss;
                 ss << "初期交差: 内部節点 " << n << " が閉じたコライダー内部にあります。";
@@ -570,7 +613,7 @@ double Solver::current_minimum_gap(uint64_t *candidate_count) const
     std::vector<uint32_t> candidates;
     const double padding = material_.radius + material_.collider_offset + material_.barrier_distance;
     for (const Element &e : elements_) {
-        if (nodes_[e.i].fixed) continue;
+        if (nodes_[e.i].fixed || !e.collider_contact) continue;
         const Vec3 lower = nodes_[e.i].x.cwiseMin(nodes_[e.j].x);
         const Vec3 upper = nodes_[e.i].x.cwiseMax(nodes_[e.j].x);
         collider_bvh_.query(lower, upper, padding, candidates);

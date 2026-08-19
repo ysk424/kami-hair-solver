@@ -2,6 +2,8 @@
 
 Blender 5.2 の Hair Curves を、回転自由度付きの幾何学的非線形 Cosserat ロッド有限要素として計算する Windows x64 DLL と Blender Extension です。
 
+Version 0.3.1 の実装済み挙動は、英語版の [Current Specification](CURRENT_SPECIFICATION.md) に記録しています。これは初期要求ではなく、現行コードのas-built仕様です。
+
 この実装は PBD／XPBD／位置拘束投影を使用しません。慣性、ロッド弾性、バリア接触をCUDA上の増分ポテンシャルとして評価し、ストランド並列Gauss-Newton、BVH、CCD line searchで実行可能解を求めます。摩擦は非線形系を不安定化させないGPU Coulombインパルスとして各サブステップ後に適用します。CPUソルバーへのフォールバックはありません。
 
 ## 構成
@@ -26,7 +28,7 @@ cmake --build build-cuda --target blender-extension-test
 cmake --build build-cuda --target blender-extension
 ```
 
-CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.2.0-windows-x64.zip` です。
+CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.3.1-windows-x64.zip` です。
 
 ## Blender での使用
 
@@ -38,6 +40,8 @@ Extension を有効にすると、3D View のサイドバーに「髪」タブ�
 4. 「髪を計算」で全フレームをGPUへ転送してからベイクします。転送・フレーム・サブステップ・反復・残り時間をパネルに表示し、Escで中止できます。
 
 元 Hair Curves は変更しません。結果はワールド座標の別オブジェクト「髪_計算結果」と、倍精度の `.khc` キャッシュへ保存します。フレーム変更時にキャッシュから元点数の座標を読み戻します。内部細分点を含む有限要素メッシュは DLL 内だけに保持します。
+
+「最小動力学長」は0で無効です。正の値を指定すると、それより短いストランドを開始形状の毛先接線方向へ同一材料で非表示延長します。仮想部分は質量、回転慣性、Cosserat弾性、重力を持ちますが、BODY接触には参加しません。結果オブジェクトとキャッシュには元の Hair Curves の点だけを出力します。これは短い自由端の実物理ではなく、可視部分を長いロッドの先頭部分として計算する明示的な代理モデルです。
 
 ## 現在の範囲
 

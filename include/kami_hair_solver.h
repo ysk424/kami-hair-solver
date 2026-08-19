@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define KHS_ABI_VERSION 2u
+#define KHS_ABI_VERSION 3u
 
 typedef struct KhsSolver KhsSolver;
 
@@ -70,6 +70,8 @@ typedef struct KhsSolverDesc {
     double minimum_line_search_step;
     double minimum_gap;
     double maximum_element_length;
+    /* 0 で無効。短いストランドは毛先接線方向へこの自然長まで物理的に延長する。 */
+    double minimum_dynamic_length;
     uint32_t fixed_root_nodes;
     uint32_t thread_count;
 } KhsSolverDesc;
@@ -104,6 +106,9 @@ typedef struct KhsBuildStats {
     uint32_t collider_inconsistent_edge_count;
     uint32_t collider_inverted_closed_component_count;
     uint32_t merged_zero_length_segment_count;
+    uint32_t virtual_extension_strand_count;
+    uint32_t virtual_extension_node_count;
+    double virtual_extension_rest_length;
     uint64_t degree_of_freedom_count;
     uint64_t estimated_bytes;
     double initial_minimum_gap;

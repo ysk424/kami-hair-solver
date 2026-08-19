@@ -1,6 +1,7 @@
 #include "kami_hair_solver.h"
 #include "solver.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <new>
@@ -40,6 +41,7 @@ bool valid_desc(const KhsSolverDesc *desc)
         desc->absolute_tolerance > 0.0 && desc->relative_tolerance > 0.0 &&
         desc->increment_tolerance > 0.0 && desc->minimum_line_search_step > 0.0 &&
         desc->minimum_gap > 0.0 && desc->maximum_element_length > 0.0 &&
+        desc->minimum_dynamic_length >= 0.0 && std::isfinite(desc->minimum_dynamic_length) &&
         desc->fixed_root_nodes > 0;
 }
 
@@ -77,6 +79,7 @@ void khsDefaultSolverDesc(KhsSolverDesc *desc)
     desc->minimum_line_search_step = 1.0e-9;
     desc->minimum_gap = 1.0e-7;
     desc->maximum_element_length = 0.01;
+    desc->minimum_dynamic_length = 0.0;
     desc->fixed_root_nodes = 2;
     desc->thread_count = 0;
 }

@@ -27,6 +27,7 @@ struct CudaElementInit {
     uint32_t i = 0;
     uint32_t j = 0;
     uint32_t strand = 0;
+    uint32_t collider_contact = 1;
     double rest_length = 0.0;
     KhsVec3 rest_shear{};
     KhsVec3 rest_curvature{};

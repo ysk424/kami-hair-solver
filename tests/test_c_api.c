@@ -11,6 +11,10 @@ int main(void)
     assert(khsGetAbiVersion() == KHS_ABI_VERSION);
     assert(desc.struct_size == sizeof(desc));
     assert(material.struct_size == sizeof(material));
+    assert(desc.minimum_dynamic_length == 0.0);
+    desc.minimum_dynamic_length = -1.0;
+    assert(khsCreate(&desc) == 0);
+    desc.minimum_dynamic_length = 0.0;
     KhsGpuInfo gpu = {0};
     gpu.struct_size = sizeof(gpu);
     assert(khsGetGpuInfo(&gpu) == KHS_OK);

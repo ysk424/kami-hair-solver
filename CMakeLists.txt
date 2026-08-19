@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(kami_hair_solver VERSION 0.2.0 LANGUAGES C CXX CUDA)
+project(kami_hair_solver VERSION 0.3.1 LANGUAGES C CXX CUDA)
 
 if(WIN32 AND NOT MSVC)
     message(FATAL_ERROR "CUDA版はMSVC/Visual Studio 2022で構築してください")

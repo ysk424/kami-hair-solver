@@ -151,7 +151,7 @@ struct DNode {
     double binding_t;
     uint32_t fixed;
 };
-struct DElement { uint32_t i,j,strand; double rest_length; DVec3 rest_shear,rest_curvature; };
+struct DElement { uint32_t i,j,strand,collider_contact; double rest_length; DVec3 rest_shear,rest_curvature; };
 struct DStrand { uint32_t first,count,fixed_count; };
 struct DTriangle { uint32_t i0,i1,i2; };
 struct DBvhNode { DVec3 lower,upper; uint32_t begin,count; int left,right; };
@@ -355,7 +355,7 @@ public:
                 hrp[i]=make_vec(s.position.x,s.position.y,s.position.z);hrr[i]=make_vec(s.rotation.x,s.rotation.y,s.rotation.z);
             }
             std::vector<DElement>he(element_count_);for(uint32_t i=0;i<element_count_;++i){const auto&s=elements[i];
-                he[i]={s.i,s.j,s.strand,s.rest_length,make_vec(s.rest_shear.x,s.rest_shear.y,s.rest_shear.z),
+                he[i]={s.i,s.j,s.strand,s.collider_contact,s.rest_length,make_vec(s.rest_shear.x,s.rest_shear.y,s.rest_shear.z),
                     make_vec(s.rest_curvature.x,s.rest_curvature.y,s.rest_curvature.z)};}
             double maximum_rest_length=0.0;for(const auto&e:elements)maximum_rest_length=fmax(maximum_rest_length,e.rest_length);
             translation_trust_radius_=fmax(0.25*maximum_rest_length,
@@ -816,7 +816,7 @@ __global__ void element_energy_kernel(const double*q,const double*old_q,const DN
         if(a<6&&b<6&&!nodes[e.i].fixed)atomicAdd(&diagonal[36*e.i+6*a+b],h);
         else if(a>=6&&b>=6&&!nodes[e.j].fixed)atomicAdd(&diagonal[36*e.j+6*(a-6)+(b-6)],h);
         else if(a<6&&b>=6&&!nodes[e.i].fixed&&!nodes[e.j].fixed)upper[36*e.i+6*a+(b-6)]+=h;}}
-    if(!has_collider||nodes[e.i].fixed)return;const DVec3 p0=make_vec(q[6*e.i],q[6*e.i+1],q[6*e.i+2]),p1=make_vec(q[6*e.j],q[6*e.j+1],q[6*e.j+2]);
+    if(!has_collider||nodes[e.i].fixed||!e.collider_contact)return;const DVec3 p0=make_vec(q[6*e.i],q[6*e.i+1],q[6*e.i+2]),p1=make_vec(q[6*e.j],q[6*e.j+1],q[6*e.j+2]);
     const DVec3 lo=min_vec(p0,p1),hi=max_vec(p0,p1);const double padding=material.radius+material.collider_offset+material.barrier_distance;
     uint32_t closest_index=0xffffffffu;ClosestPair pair{1.0e300,0.0,make_vec(1,0,0)};
     query_bvh(bvh,order,lo,hi,padding,[&](uint32_t ti){atomicAdd(&stats->candidates,1ULL);const DTriangle&t=triangles[ti];
@@ -841,7 +841,7 @@ __global__ void friction_impulse_kernel(const double*q,double*delta_velocity,con
                                         const DElement*elements,uint32_t element_count,const DVec3*collider,const DVec3*old_collider,
                                         const DTriangle*triangles,const DBvhNode*bvh,const uint32_t*order,DMaterial material,double dt)
 {
-    const uint32_t ei=blockIdx.x*blockDim.x+threadIdx.x;if(ei>=element_count||!(material.friction>0.0))return;const DElement&e=elements[ei];
+    const uint32_t ei=blockIdx.x*blockDim.x+threadIdx.x;if(ei>=element_count||!(material.friction>0.0))return;const DElement&e=elements[ei];if(!e.collider_contact)return;
     if(nodes[e.i].fixed&&nodes[e.j].fixed)return;const DVec3 p0=make_vec(q[6*e.i],q[6*e.i+1],q[6*e.i+2]),p1=make_vec(q[6*e.j],q[6*e.j+1],q[6*e.j+2]);
     const double padding=material.radius+material.collider_offset+material.barrier_distance;uint32_t closest_index=0xffffffffu;ClosestPair pair{1.0e300,0.0,make_vec(1,0,0)};
     query_bvh(bvh,order,min_vec(p0,p1),max_vec(p0,p1),padding,[&](uint32_t ti){const DTriangle&t=triangles[ti];
@@ -866,7 +866,7 @@ __global__ void moving_sweep_kernel(const double*q,const DNode*nodes,const DElem
                                     const DVec3*old_collider,const DVec3*collider,const DTriangle*triangles,
                                     const DBvhNode*bvh,const uint32_t*order,DMaterial material,DDesc desc,int*feasible)
 {
-    const uint32_t ei=blockIdx.x*blockDim.x+threadIdx.x;if(ei>=element_count||!*feasible)return;const DElement&e=elements[ei];if(nodes[e.i].fixed)return;
+    const uint32_t ei=blockIdx.x*blockDim.x+threadIdx.x;if(ei>=element_count||!*feasible)return;const DElement&e=elements[ei];if(nodes[e.i].fixed||!e.collider_contact)return;
     const DVec3 p0=make_vec(q[6*e.i],q[6*e.i+1],q[6*e.i+2]),p1=make_vec(q[6*e.j],q[6*e.j+1],q[6*e.j+2]);
     const double target=material.radius+material.collider_offset+desc.minimum_gap;query_bvh(bvh,order,min_vec(p0,p1),max_vec(p0,p1),target,[&](uint32_t ti){
         const DTriangle&t=triangles[ti];const DVec3 da=collider[t.i0]-old_collider[t.i0],db=collider[t.i1]-old_collider[t.i1],dc=collider[t.i2]-old_collider[t.i2];
@@ -880,7 +880,7 @@ __global__ void ccd_limit_kernel(const double*q,const double*direction,const DNo
                                  uint32_t element_count,const DVec3*collider,const DTriangle*triangles,
                                  const DBvhNode*bvh,const uint32_t*order,DMaterial material,DDesc desc,double*limit)
 {
-    const uint32_t ei=blockIdx.x*blockDim.x+threadIdx.x;if(ei>=element_count)return;const DElement&e=elements[ei];if(nodes[e.i].fixed)return;
+    const uint32_t ei=blockIdx.x*blockDim.x+threadIdx.x;if(ei>=element_count)return;const DElement&e=elements[ei];if(nodes[e.i].fixed||!e.collider_contact)return;
     const DVec3 p0=make_vec(q[6*e.i],q[6*e.i+1],q[6*e.i+2]),p1=make_vec(q[6*e.j],q[6*e.j+1],q[6*e.j+2]);
     const DVec3 d0=make_vec(direction[6*e.i],direction[6*e.i+1],direction[6*e.i+2]),d1=make_vec(direction[6*e.j],direction[6*e.j+1],direction[6*e.j+2]);
     DVec3 lo=min_vec(min_vec(p0,p1),min_vec(p0+d0,p1+d1)),hi=max_vec(max_vec(p0,p1),max_vec(p0+d0,p1+d1));

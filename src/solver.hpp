@@ -31,6 +31,7 @@ struct Node {
     double mass = 0.0;
     double rotational_mass = 0.0;
     bool fixed = false;
+    bool virtual_extension = false;
     uint32_t strand = 0;
     RootBinding binding;
 };
@@ -39,6 +40,7 @@ struct Element {
     uint32_t i = 0;
     uint32_t j = 0;
     uint32_t strand = 0;
+    bool collider_contact = true;
     double rest_length = 0.0;
     Vec3 rest_shear = Vec3::Zero();
     Vec3 rest_curvature = Vec3::Zero();
@@ -145,6 +147,9 @@ private:
     uint32_t inverted_closed_components_ = 0;
     bool collider_closed_manifold_ = false;
     uint32_t merged_segments_ = 0;
+    uint32_t virtual_extension_strands_ = 0;
+    uint32_t virtual_extension_nodes_ = 0;
+    double virtual_extension_rest_length_ = 0.0;
 
     KhsBuildStats build_stats_{};
     KhsStepStats step_stats_{};

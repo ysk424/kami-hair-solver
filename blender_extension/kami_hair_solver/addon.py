@@ -13,7 +13,7 @@ import numpy as np
 from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import Operator, Panel, PropertyGroup
-from mathutils import Matrix, Vector
+from mathutils import Matrix
 
 from .native import HairSolver
 
@@ -42,6 +42,10 @@ class HairSettings(PropertyGroup):
     newton_iterations: IntProperty(name="Newton反復上限", default=24, min=2, max=100)
     maximum_element_length: FloatProperty(
         name="最大要素長", default=0.01, min=1.0e-5, soft_max=0.05, subtype="DISTANCE", unit="LENGTH")
+    minimum_dynamic_length: FloatProperty(
+        name="最小動力学長",
+        description="短い髪を毛先接線方向へ非表示延長し、この自然長で物理計算します。延長部分はコライダーと接触しません（0で無効）",
+        default=0.0, min=0.0, soft_max=0.5, subtype="DISTANCE", unit="LENGTH")
     fixed_root_nodes: IntProperty(name="固定する毛根節点数", default=2, min=1, max=32)
     density: FloatProperty(name="密度", default=1300.0, min=1.0, soft_max=2000.0, unit="MASS")
     radius: FloatProperty(
@@ -163,6 +167,7 @@ def _configure_solver(settings):
     solver.desc.substeps = settings.substeps
     solver.desc.newton_iterations = settings.newton_iterations
     solver.desc.maximum_element_length = settings.maximum_element_length
+    solver.desc.minimum_dynamic_length = settings.minimum_dynamic_length
     solver.desc.fixed_root_nodes = settings.fixed_root_nodes
     solver.material.density = settings.density
     solver.material.radius = settings.radius
@@ -276,6 +281,11 @@ def _finish_prepare_scene(scene, state):
         f"内部{stats.internal_node_count}節点 / {stats.element_count}要素 / "
         f"CPU {memory_mb:.1f} MiB / CUDA {gpu_mb:.1f} MiB / {gpu_name}")
     diagnostics = []
+    if stats.virtual_extension_strand_count:
+        diagnostics.append(
+            f"非表示延長 {stats.virtual_extension_strand_count}本 / "
+            f"{stats.virtual_extension_node_count}節点 / "
+            f"計{stats.virtual_extension_rest_length:.3f} m")
     if stats.merged_zero_length_segment_count:
         diagnostics.append(f"ゼロ長統合 {stats.merged_zero_length_segment_count}区間")
     if stats.excluded_collider_triangle_count:
@@ -628,35 +638,6 @@ class KAMI_OT_bake(Operator):
         return {"FINISHED"}
 
 
-class KAMI_OT_collider_proxy(Operator):
-    bl_idname = "kami_hair.collider_proxy"
-    bl_label = "コライダー検査用コピーを作成"
-    bl_description = "評価・三角形化した衝突メッシュを別オブジェクトとして作成します"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        settings = context.scene.kami_hair
-        if settings.collider is None:
-            self.report({"ERROR"}, "衝突メッシュを指定してください。")
-            return {"CANCELLED"}
-        vertices, triangles, _topology = _evaluated_collider(
-            settings.collider, context.evaluated_depsgraph_get())
-        valid = []
-        for triangle in triangles:
-            a, b, c = (Vector(vertices[i]) for i in triangle)
-            if (b - a).cross(c - a).length_squared > 1.0e-24:
-                valid.append(triangle)
-        mesh = bpy.data.meshes.new("髪_コライダー検査データ")
-        mesh.from_pydata(vertices, [], valid)
-        proxy = bpy.data.objects.new("髪_コライダー検査", mesh)
-        context.scene.collection.objects.link(proxy)
-        proxy.display_type = "WIRE"
-        proxy.hide_render = True
-        proxy["髪用途"] = "コライダー検査用コピー"
-        self.report({"INFO"}, f"髪のコライダー検査用コピー: {len(vertices)}頂点 / {len(valid)}三角形")
-        return {"FINISHED"}
-
-
 class KAMI_OT_clear(Operator):
     bl_idname = "kami_hair.clear"
     bl_label = "髪の計算結果を消去"
@@ -706,6 +687,7 @@ class KAMI_PT_panel(Panel):
         row.prop(settings, "frame_start")
         row.prop(settings, "frame_end")
         layout.prop(settings, "maximum_element_length")
+        layout.prop(settings, "minimum_dynamic_length")
         layout.prop(settings, "fixed_root_nodes")
         layout.prop(settings, "substeps")
         layout.prop(settings, "newton_iterations")
@@ -727,7 +709,6 @@ class KAMI_PT_panel(Panel):
         row = layout.row(align=True)
         row.operator("kami_hair.prepare", icon="MOD_PARTICLES")
         row.operator("kami_hair.bake", icon="PHYSICS")
-        layout.operator("kami_hair.collider_proxy", icon="MESH_DATA")
         layout.operator("kami_hair.clear", icon="TRASH")
         layout.separator()
         layout.label(text=f"状態: {settings.status}")
@@ -735,8 +716,7 @@ class KAMI_PT_panel(Panel):
             layout.label(text=settings.summary)
 
 
-_CLASSES = (HairSettings, KAMI_OT_prepare, KAMI_OT_bake, KAMI_OT_collider_proxy,
-            KAMI_OT_clear, KAMI_PT_panel)
+_CLASSES = (HairSettings, KAMI_OT_prepare, KAMI_OT_bake, KAMI_OT_clear, KAMI_PT_panel)
 
 
 def register():
