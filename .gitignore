@@ -3,5 +3,7 @@
 *.user
 *.suo
 *.zip
+*.khc
+*.khc.未完成
 __pycache__/
 *.pyc

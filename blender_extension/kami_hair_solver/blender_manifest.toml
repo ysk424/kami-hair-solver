@@ -1,0 +1,13 @@
+schema_version = "1.0.0"
+id = "kami_hair_solver"
+version = "0.2.0"
+name = "髪"
+tagline = "CUDA Hair Curves非線形有限要素接触ソルバー"
+maintainer = "Kami Hair Solver contributors"
+type = "add-on"
+license = ["SPDX:GPL-3.0-or-later"]
+blender_version_min = "5.2.0"
+platforms = ["windows-x64"]
+
+[permissions]
+files = "髪の計算結果を専用バイナリキャッシュへ保存します"
