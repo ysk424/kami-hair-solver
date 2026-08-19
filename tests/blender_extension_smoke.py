@@ -20,12 +20,53 @@ def point_positions(obj):
     return [tuple(flat[3 * i:3 * i + 3]) for i in range(len(obj.data.points))]
 
 
+def test_incomplete_cache_resume(addon, directory):
+    class FakeSolver:
+        def __init__(self):
+            self.failed_once = False
+
+        def positions(self):
+            return [(1.0, 0.0, 0.0)]
+
+        def step_animation_frame(self, frame, _dt):
+            if frame == 2 and not self.failed_once:
+                self.failed_once = True
+                raise RuntimeError("意図した再開試験エラー")
+            return [(float(frame + 1), 0.0, 0.0)], None
+
+    path = directory / "再開試験.khc"
+    temporary = path.with_suffix(path.suffix + ".未完成")
+    path.unlink(missing_ok=True)
+    temporary.unlink(missing_ok=True)
+    solver = FakeSolver()
+    session = {"solver": solver, "point_count": 1}
+    state = addon._new_calculation_state(1)
+    addon._calculate_preloaded(session, 1, 3, 24.0, path, state)
+    assert state["error"] is not None
+    assert state["completed_frame"] == 2
+    assert temporary.exists() and not path.exists()
+
+    record = addon._resume_record(session, 1, 3, path, state)
+    resumed = addon._new_calculation_state(1, resume=record)
+    addon._calculate_preloaded(session, 1, 3, 24.0, path, resumed)
+    assert resumed["error"] is None
+    assert resumed["completed_frame"] == 3
+    assert path.exists() and not temporary.exists()
+    assert addon._read_cache_frame(path, 1) == [(1.0, 0.0, 0.0)]
+    assert addon._read_cache_frame(path, 2) == [(2.0, 0.0, 0.0)]
+    assert addon._read_cache_frame(path, 3) == [(3.0, 0.0, 0.0)]
+    path.unlink()
+
+
 def main():
     args = arguments()
     stage = Path(args.extension_stage).resolve()
     sys.path.insert(0, str(stage.parent))
     import kami_hair_solver
     from kami_hair_solver import addon
+
+    notifications = []
+    addon._notify_codex = lambda: notifications.append("PING") or None
 
     kami_hair_solver.register()
     scene = bpy.context.scene
@@ -87,6 +128,18 @@ def main():
     assert abs(stats.virtual_extension_rest_length - 0.06) < 1.0e-6
     assert settings.result is not hair
     assert settings.result.name.startswith("髪_計算結果")
+    solver = addon._SESSIONS[scene.as_pointer()]["solver"]
+    solver.desc.substeps = 9
+    solver.update_runtime_parameters()
+    original_element_length = solver.desc.maximum_element_length
+    solver.desc.maximum_element_length *= 1.1
+    try:
+        solver.update_runtime_parameters()
+        raise AssertionError("構造パラメーター変更が拒否されませんでした")
+    except RuntimeError as exception:
+        assert "最初から計算" in str(exception)
+    solver.desc.maximum_element_length = original_element_length
+    solver.update_runtime_parameters()
     try:
         result = addon.bake_scene(scene)
     except Exception:
@@ -104,8 +157,21 @@ def main():
     assert first[0] == second[0]
     assert settings.status.startswith("計算完了")
     assert addon.KAMI_PT_panel.bl_label == "髪"
+    assert notifications == ["PING"]
+    test_incomplete_cache_resume(addon, stage.parent)
+    successful_status = settings.status
+    settings.hair = None
+    try:
+        addon.bake_scene(scene)
+        raise AssertionError("入力エラー試験が失敗しませんでした")
+    except RuntimeError as exception:
+        assert "Hair Curves" in str(exception)
+    assert notifications == ["PING", "PING"]
+    assert settings.status.startswith("計算失敗: CUDA準備")
+    assert "RuntimeError" in settings.error_detail
+    settings.hair = hair
     print({
-        "status": settings.status,
+        "status": successful_status,
         "summary": settings.summary,
         "cache": settings.cache_path,
         "source_unchanged": point_positions(hair) == source_before,

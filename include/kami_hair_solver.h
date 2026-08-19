@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define KHS_ABI_VERSION 3u
+#define KHS_ABI_VERSION 4u
 
 typedef struct KhsSolver KhsSolver;
 
@@ -195,6 +195,15 @@ KHS_API KhsResult khsSetColliderMesh(KhsSolver *solver,
                                      uint32_t triangle_count);
 
 KHS_API KhsResult khsBuild(KhsSolver *solver);
+
+/*
+ * 構築済みソルバーの現在状態を保持したまま実行時パラメーターを更新する。
+ * 内部メッシュ構造を決める maximum_element_length、minimum_dynamic_length、
+ * fixed_root_nodes は構築時の値から変更できない。
+ */
+KHS_API KhsResult khsUpdateRuntimeParameters(KhsSolver *solver,
+                                              const KhsSolverDesc *desc,
+                                              const KhsHairMaterial *material);
 
 /* 評価後の同じトポロジーを次フレームの目標として渡す。 */
 KHS_API KhsResult khsUpdateColliderVertices(KhsSolver *solver,

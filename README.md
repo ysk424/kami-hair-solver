@@ -2,7 +2,7 @@
 
 Blender 5.2 の Hair Curves を、回転自由度付きの幾何学的非線形 Cosserat ロッド有限要素として計算する Windows x64 DLL と Blender Extension です。
 
-Version 0.3.1 の実装済み挙動は、英語版の [Current Specification](CURRENT_SPECIFICATION.md) に記録しています。これは初期要求ではなく、現行コードのas-built仕様です。
+Version 0.4.0 の実装済み挙動は、英語版の [Current Specification](CURRENT_SPECIFICATION.md) に記録しています。これは初期要求ではなく、現行コードのas-built仕様です。
 
 この実装は PBD／XPBD／位置拘束投影を使用しません。慣性、ロッド弾性、バリア接触をCUDA上の増分ポテンシャルとして評価し、ストランド並列Gauss-Newton、BVH、CCD line searchで実行可能解を求めます。摩擦は非線形系を不安定化させないGPU Coulombインパルスとして各サブステップ後に適用します。CPUソルバーへのフォールバックはありません。
 
@@ -28,7 +28,7 @@ cmake --build build-cuda --target blender-extension-test
 cmake --build build-cuda --target blender-extension
 ```
 
-CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.3.1-windows-x64.zip` です。
+CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.4.0-windows-x64.zip` です。
 
 ## Blender での使用
 
@@ -38,6 +38,9 @@ Extension を有効にすると、3D View のサイドバーに「髪」タブ�
 2. 必要なら評価後に三角形化できる「衝突メッシュ」を指定します。
 3. 「髪を準備」でゼロ長区間、縮退面、初期交差、最小ギャップを検査できます。
 4. 「髪を計算」で全フレームをGPUへ転送してからベイクします。転送・フレーム・サブステップ・反復・残り時間をパネルに表示し、Escで中止できます。
+5. 計算に失敗した場合は詳細表示を確認して設定を調整し、「失敗フレームから再開」で完了済みフレームの続きから再計算できます。
+
+正常完了またはエラー終了時には `127.0.0.1:8765/UDP` へ `PING` を送り、`PONG` 応答を確認します。通知用アプリが応答しない場合は、シミュレーション結果を変えずに通知エラーをパネルへ表示します。
 
 元 Hair Curves は変更しません。結果はワールド座標の別オブジェクト「髪_計算結果」と、倍精度の `.khc` キャッシュへ保存します。フレーム変更時にキャッシュから元点数の座標を読み戻します。内部細分点を含む有限要素メッシュは DLL 内だけに保持します。
 

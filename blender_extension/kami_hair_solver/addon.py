@@ -4,7 +4,9 @@ from array import array
 import hashlib
 import os
 from pathlib import Path
+import socket
 import struct
+import textwrap
 import threading
 import time
 
@@ -22,6 +24,17 @@ _CACHE_MAGIC = b"KAMIHC1\0"
 _CACHE_HEADER = struct.Struct("<8sIII")
 _SESSIONS = {}
 _ACTIVE_BAKES = set()
+_RESUMABLE_BAKES = {}
+_PROGRESS_PHASE_NAMES = {
+    0: "待機",
+    1: "準備",
+    2: "方程式組立",
+    3: "線形求解",
+    4: "衝突判定",
+    5: "ラインサーチ",
+    6: "完了",
+    7: "失敗",
+}
 
 
 def _hair_poll(_self, obj):
@@ -65,6 +78,60 @@ class HairSettings(PropertyGroup):
     show_advanced: BoolProperty(name="詳細設定", default=False)
     status: StringProperty(name="状態", default="未準備")
     summary: StringProperty(name="準備情報", default="")
+    error_detail: StringProperty(name="エラー詳細", default="")
+
+
+def _notify_codex():
+    """Notify the local terminal helper without changing the simulation result."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(1.0)
+            client.sendto(b"PING", ("127.0.0.1", 8765))
+            response, _remote = client.recvfrom(64)
+        if response.strip().upper() != b"PONG":
+            return f"8765/UDPから予期しない応答を受信しました: {response!r}"
+    except OSError as exception:
+        return f"8765/UDP通知に失敗しました: {exception}"
+    return None
+
+
+def _append_notification_error(settings, notification_error):
+    if not notification_error:
+        return
+    if settings.error_detail:
+        settings.error_detail += "\n"
+    settings.error_detail += notification_error
+
+
+def _progress_snapshot(solver):
+    try:
+        progress = solver.progress()
+        return {
+            "phase": int(progress.phase),
+            "substep": int(progress.substep),
+            "substep_count": int(progress.substep_count),
+            "iteration": int(progress.nonlinear_iteration),
+            "iteration_limit": int(progress.nonlinear_iteration_limit),
+        }
+    except Exception:
+        return None
+
+
+def _failure_detail(stage, exception, *, completed_frame=None, failed_frame=None, progress=None):
+    parts = [stage]
+    if completed_frame is not None:
+        parts.append(f"フレーム{completed_frame}まで完了")
+    if failed_frame is not None:
+        parts.append(f"フレーム{failed_frame}で停止")
+    if progress:
+        phase = _PROGRESS_PHASE_NAMES.get(progress["phase"], f"フェーズ{progress['phase']}")
+        parts.append(phase)
+        if progress["substep_count"]:
+            parts.append(f"サブステップ {progress['substep']}/{progress['substep_count']}")
+        if progress["iteration_limit"]:
+            parts.append(f"Newton反復 {progress['iteration']}/{progress['iteration_limit']}")
+    parts.append(f"{type(exception).__name__}: {exception}")
+    return " / ".join(parts)
 
 
 def _evaluated_hair(obj, depsgraph):
@@ -162,8 +229,7 @@ def _new_result_object(scene, source, sizes, positions, radii):
     return result
 
 
-def _configure_solver(settings):
-    solver = HairSolver()
+def _apply_solver_settings(settings, solver):
     solver.desc.substeps = settings.substeps
     solver.desc.newton_iterations = settings.newton_iterations
     solver.desc.maximum_element_length = settings.maximum_element_length
@@ -178,12 +244,18 @@ def _configure_solver(settings):
     solver.material.barrier_distance = settings.barrier_distance
     solver.material.friction = settings.friction
     solver.material.collider_offset = settings.collider_offset
+
+
+def _configure_solver(settings):
+    solver = HairSolver()
+    _apply_solver_settings(settings, solver)
     solver.create()
     return solver
 
 
 def _begin_prepare_scene(scene):
     settings = scene.kami_hair
+    settings.error_detail = ""
     if settings.hair is None or settings.hair.type != "CURVES":
         raise RuntimeError("入力する Hair Curves を指定してください。")
     if settings.collider is not None and settings.collider.type != "MESH":
@@ -257,7 +329,16 @@ def _finish_prepare_scene(scene, state):
     gpu_info = solver.gpu_info()
     gpu_stats = solver.gpu_stats()
     result = _new_result_object(scene, settings.hair, state["sizes"], state["points"], state["radii"])
-    old_session = _SESSIONS.pop(scene.as_pointer(), None)
+    scene_key = scene.as_pointer()
+    old_resume = _RESUMABLE_BAKES.pop(scene_key, None)
+    if old_resume:
+        old_temporary = old_resume["path"].with_suffix(old_resume["path"].suffix + ".未完成")
+        try:
+            if old_temporary.exists():
+                old_temporary.unlink()
+        except OSError:
+            pass
+    old_session = _SESSIONS.pop(scene_key, None)
     if old_session:
         old_session["solver"].close()
     session = {
@@ -270,8 +351,12 @@ def _finish_prepare_scene(scene, state):
         "gpu_stats": gpu_stats,
         "point_count": len(state["points"]),
         "result": result,
+        "hair": settings.hair,
+        "collider": settings.collider,
+        "frame_start": settings.frame_start,
+        "frame_end": settings.frame_end,
     }
-    _SESSIONS[scene.as_pointer()] = session
+    _SESSIONS[scene_key] = session
     stats = state["stats"]
     memory_mb = stats.estimated_bytes / (1024.0 * 1024.0)
     gpu_mb = gpu_stats.resident_bytes / (1024.0 * 1024.0)
@@ -362,76 +447,187 @@ def _duration_text(seconds):
     return f"{seconds}秒"
 
 
-def _calculate_preloaded(session, start, end, fps, path, state):
+def _new_calculation_state(start, *, resume=None):
+    resume = resume or {}
+    return {
+        "done": False,
+        "error": None,
+        "error_stage": None,
+        "error_progress": None,
+        "failed_frame": None,
+        "completed_frame": resume.get("completed_frame", start - 1),
+        "solver_frame": resume.get("solver_frame", start),
+        "pending_positions": resume.get("pending_positions"),
+        "frame_seconds": list(resume.get("frame_seconds", [])),
+        "final_stats": resume.get("final_stats"),
+        "final_positions": resume.get("final_positions"),
+        "cancelled": False,
+        "resume": bool(resume),
+    }
+
+
+def _open_cache_for_calculation(temporary, start, end, point_count, state):
+    if not state["resume"]:
+        file = temporary.open("wb")
+        file.write(_CACHE_HEADER.pack(_CACHE_MAGIC, start, end, point_count))
+        return file
+
+    file = temporary.open("r+b")
+    raw = file.read(_CACHE_HEADER.size)
+    expected_header = (_CACHE_MAGIC, start, end, point_count)
+    if len(raw) != _CACHE_HEADER.size or _CACHE_HEADER.unpack(raw) != expected_header:
+        file.close()
+        raise RuntimeError("未完成キャッシュのヘッダーが再開対象と一致しません。")
+    completed_count = max(0, state["completed_frame"] - start + 1)
+    expected_size = _CACHE_HEADER.size + completed_count * point_count * 3 * 8
+    file.seek(0, os.SEEK_END)
+    if file.tell() < expected_size:
+        file.close()
+        raise RuntimeError("未完成キャッシュが完了フレームより短いため再開できません。")
+    file.truncate(expected_size)
+    file.seek(expected_size)
+    return file
+
+
+def _calculate_preloaded(session, start, end, fps, path, state, frame_callback=None):
     solver = session["solver"]
     temporary = path.with_suffix(path.suffix + ".未完成")
-    final_stats = None
-    final_positions = None
     try:
-        with temporary.open("wb") as file:
-            file.write(_CACHE_HEADER.pack(_CACHE_MAGIC, start, end, session["point_count"]))
-            for frame in range(start, end + 1):
+        state["error_stage"] = "未完成キャッシュを開く処理"
+        with _open_cache_for_calculation(
+                temporary, start, end, session["point_count"], state) as file:
+            for frame in range(state["completed_frame"] + 1, end + 1):
+                state["failed_frame"] = frame
                 if state.get("cancelled"):
+                    state["error_stage"] = "中止処理"
                     raise RuntimeError("CUDA計算を中止しました。")
                 frame_began = time.perf_counter()
-                if frame == start:
+                if state["pending_positions"] is not None and state["solver_frame"] == frame:
+                    positions = state["pending_positions"]
+                elif frame == start and state["solver_frame"] == start:
+                    state["error_stage"] = f"フレーム{frame}の初期状態取得"
                     positions = solver.positions()
+                    state["pending_positions"] = positions
                 else:
-                    positions, final_stats = solver.step_animation_frame(frame - start, 1.0 / fps)
+                    state["error_stage"] = f"フレーム{frame}のCUDA求解"
+                    positions, state["final_stats"] = solver.step_animation_frame(
+                        frame - start, 1.0 / fps)
+                    state["solver_frame"] = frame
+                    state["pending_positions"] = positions
+
+                state["error_stage"] = f"フレーム{frame}のキャッシュ書込"
                 _write_cache_frame(file, positions)
                 file.flush()
-                final_positions = positions
+                state["final_positions"] = positions
                 state["completed_frame"] = frame
+                state["pending_positions"] = None
                 state["frame_seconds"].append(time.perf_counter() - frame_began)
+                if frame_callback:
+                    frame_callback(frame, positions)
+        state["error_stage"] = "完成キャッシュの確定"
         os.replace(temporary, path)
-        state["final_stats"] = final_stats
-        state["final_positions"] = final_positions
+        state["failed_frame"] = None
+        state["error_stage"] = None
     except Exception as exception:
-        if temporary.exists():
-            temporary.unlink()
         state["error"] = exception
+        state["error_progress"] = _progress_snapshot(solver)
     finally:
         state["done"] = True
 
 
+def _resume_record(session, start, end, path, state):
+    return {
+        "session": session,
+        "start": start,
+        "end": end,
+        "path": path,
+        "completed_frame": state["completed_frame"],
+        "solver_frame": state["solver_frame"],
+        "pending_positions": state["pending_positions"],
+        "frame_seconds": state["frame_seconds"],
+        "final_stats": state["final_stats"],
+        "final_positions": state["final_positions"],
+        "failed_frame": state["failed_frame"],
+        "error_stage": state["error_stage"],
+        "error_progress": state["error_progress"],
+    }
+
+
+def _store_resume_record(scene_key, session, start, end, path, state):
+    temporary = path.with_suffix(path.suffix + ".未完成")
+    try:
+        with temporary.open("rb") as file:
+            raw = file.read(_CACHE_HEADER.size)
+        if (len(raw) != _CACHE_HEADER.size or
+                _CACHE_HEADER.unpack(raw) != (_CACHE_MAGIC, start, end, session["point_count"])):
+            raise RuntimeError("未完成キャッシュのヘッダーが不正です。")
+        completed_count = max(0, state["completed_frame"] - start + 1)
+        minimum_size = _CACHE_HEADER.size + completed_count * session["point_count"] * 3 * 8
+        if temporary.stat().st_size < minimum_size:
+            raise RuntimeError("未完成キャッシュが完了フレームより短いです。")
+    except (OSError, RuntimeError, struct.error):
+        _RESUMABLE_BAKES.pop(scene_key, None)
+        return False
+    _RESUMABLE_BAKES[scene_key] = _resume_record(session, start, end, path, state)
+    return True
+
+
+def _finish_bake_result(session, path, start, end, positions):
+    result = session["result"]
+    result["髪キャッシュ"] = str(path)
+    result["髪開始フレーム"] = start
+    result["髪終了フレーム"] = end
+    result["髪点数"] = session["point_count"]
+    result["髪解法"] = "CUDA・Cosserat FEM・implicit Euler・Gauss-Newton・バリア接触・Coulomb摩擦"
+    if positions is not None:
+        _set_hair_positions(result, positions)
+    return result
+
+
 def bake_scene(scene, progress=None):
     settings = scene.kami_hair
-    prepare_scene(scene)
-    session = _SESSIONS[scene.as_pointer()]
-    solver = session["solver"]
-    start = settings.frame_start
-    end = settings.frame_end
-    path = Path(bpy.path.abspath(settings.cache_path))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".未完成")
+    scene_key = scene.as_pointer()
     original_frame = scene.frame_current
-    fps = scene.render.fps / scene.render.fps_base
-    began = time.perf_counter()
-    final_stats = None
+    state = None
+    notified = False
     try:
-        with temporary.open("wb") as file:
-            file.write(_CACHE_HEADER.pack(_CACHE_MAGIC, start, end, session["point_count"]))
-            for frame in range(start, end + 1):
-                if frame == start:
-                    positions = solver.positions()
-                else:
-                    positions, final_stats = solver.step_animation_frame(frame - start, 1.0 / fps)
-                _write_cache_frame(file, positions)
-                _set_hair_positions(session["result"], positions)
-                elapsed = time.perf_counter() - began
-                done = frame - start + 1
-                total = end - start + 1
-                remaining = elapsed / done * (total - done)
-                settings.status = f"計算中 {frame}/{end}（残り約{remaining:.0f}秒）"
-                if progress:
-                    progress(frame, start, end)
-        os.replace(temporary, path)
-        result = session["result"]
-        result["髪キャッシュ"] = str(path)
-        result["髪開始フレーム"] = start
-        result["髪終了フレーム"] = end
-        result["髪点数"] = session["point_count"]
-        result["髪解法"] = "CUDA・Cosserat FEM・implicit Euler・Gauss-Newton・バリア接触・Coulomb摩擦"
+        prepare_scene(scene)
+        session = _SESSIONS[scene_key]
+        start = settings.frame_start
+        end = settings.frame_end
+        path = Path(bpy.path.abspath(settings.cache_path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fps = scene.render.fps / scene.render.fps_base
+        began = time.perf_counter()
+        state = _new_calculation_state(start)
+
+        def frame_finished(frame, positions):
+            _set_hair_positions(session["result"], positions)
+            done = frame - start + 1
+            total = end - start + 1
+            remaining = (time.perf_counter() - began) / done * (total - done)
+            settings.status = f"計算中 {frame}/{end}（残り約{remaining:.0f}秒）"
+            if progress:
+                progress(frame, start, end)
+
+        _calculate_preloaded(session, start, end, fps, path, state, frame_finished)
+        if state["error"] is not None:
+            _store_resume_record(scene_key, session, start, end, path, state)
+            settings.error_detail = _failure_detail(
+                state["error_stage"], state["error"],
+                completed_frame=(state["completed_frame"]
+                                 if state["completed_frame"] >= start else None),
+                failed_frame=state["failed_frame"],
+                progress=state["error_progress"])
+            settings.status = f"計算失敗: {settings.error_detail}"
+            _append_notification_error(settings, _notify_codex())
+            notified = True
+            raise state["error"]
+
+        _RESUMABLE_BAKES.pop(scene_key, None)
+        result = _finish_bake_result(
+            session, path, start, end, state["final_positions"])
+        final_stats = state["final_stats"]
         if final_stats:
             gap_text = (f"最小ギャップ {final_stats.minimum_gap:.3e} m"
                         if final_stats.minimum_gap != float("inf") else "接触候補なし")
@@ -440,11 +636,16 @@ def bake_scene(scene, progress=None):
                 f"最終残差 {final_stats.final_residual_norm:.3e} / {gap_text}")
         else:
             settings.status = "計算完了（開始フレームのみ）"
+        settings.error_detail = ""
+        _append_notification_error(settings, _notify_codex())
+        notified = True
         return result
-    except Exception:
-        if temporary.exists():
-            temporary.unlink()
-        settings.status = "計算失敗"
+    except Exception as exception:
+        if state is None:
+            settings.error_detail = _failure_detail("CUDA準備", exception)
+            settings.status = f"計算失敗: {settings.error_detail}"
+        if not notified:
+            _append_notification_error(settings, _notify_codex())
         raise
     finally:
         scene.frame_set(original_frame)
@@ -482,6 +683,62 @@ class KAMI_OT_bake(Operator):
     bl_label = "髪を計算"
     bl_description = "全フレームを非線形有限要素接触ソルバーで計算します"
     bl_options = {"REGISTER"}
+    resume: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
+    def _start_modal(self, context):
+        self._timer = context.window_manager.event_timer_add(0.2, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        _ACTIVE_BAKES.add(self._scene_key)
+        return {"RUNNING_MODAL"}
+
+    def _execute_resume(self, context, scene, scene_key):
+        settings = scene.kami_hair
+        record = _RESUMABLE_BAKES.get(scene_key)
+        if record is None:
+            message = "再開できる未完成の計算がありません。"
+            settings.error_detail = message
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+        session = record["session"]
+        try:
+            if _SESSIONS.get(scene_key) is not session:
+                raise RuntimeError("再開対象のCUDAセッションが失われました。最初から計算してください。")
+            if settings.hair != session["hair"] or settings.collider != session["collider"]:
+                raise RuntimeError("再開中は入力する髪と衝突メッシュを変更できません。")
+            if settings.frame_start != record["start"] or settings.frame_end != record["end"]:
+                raise RuntimeError("再開中は開始フレームと終了フレームを変更できません。")
+            path = Path(bpy.path.abspath(settings.cache_path))
+            if path != record["path"]:
+                raise RuntimeError("再開中は髪キャッシュの保存先を変更できません。")
+            _apply_solver_settings(settings, session["solver"])
+            session["solver"].update_runtime_parameters()
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exception:
+            settings.error_detail = _failure_detail("再開準備", exception)
+            settings.status = f"再開失敗: {settings.error_detail}"
+            self.report({"ERROR"}, str(exception))
+            _append_notification_error(settings, _notify_codex())
+            return {"CANCELLED"}
+
+        self._scene = scene
+        self._scene_key = scene_key
+        self._original_frame = scene.frame_current
+        self._phase = "solve"
+        self._session = session
+        self._path = path
+        self._start = record["start"]
+        self._end = record["end"]
+        self._state = _new_calculation_state(self._start, resume=record)
+        self._began = time.perf_counter()
+        fps = scene.render.fps / scene.render.fps_base
+        self._thread = threading.Thread(
+            target=_calculate_preloaded,
+            args=(session, self._start, self._end, fps, path, self._state),
+            name="髪CUDA再開計算", daemon=True)
+        self._thread.start()
+        settings.error_detail = ""
+        settings.status = f"CUDA計算をフレーム{self._state['completed_frame'] + 1}から再開"
+        return self._start_modal(context)
 
     def execute(self, context):
         scene = context.scene
@@ -489,21 +746,24 @@ class KAMI_OT_bake(Operator):
         if scene_key in _ACTIVE_BAKES:
             self.report({"ERROR"}, "このシーンはCUDA計算中です。")
             return {"CANCELLED"}
+        if self.resume:
+            return self._execute_resume(context, scene, scene_key)
         self._began = time.perf_counter()
         try:
             prepare_state = _begin_prepare_scene(scene)
         except Exception as exception:
+            settings = scene.kami_hair
+            settings.error_detail = _failure_detail("CUDA準備開始", exception)
+            settings.status = f"計算失敗: {settings.error_detail}"
             self.report({"ERROR"}, str(exception))
+            _append_notification_error(settings, _notify_codex())
             return {"CANCELLED"}
         self._scene = scene
         self._scene_key = scene_key
         self._prepare_state = prepare_state
         self._original_frame = prepare_state["original_frame"]
         self._phase = "prepare"
-        self._timer = context.window_manager.event_timer_add(0.2, window=context.window)
-        context.window_manager.modal_handler_add(self)
-        _ACTIVE_BAKES.add(scene_key)
-        return {"RUNNING_MODAL"}
+        return self._start_modal(context)
 
     def _redraw(self, context):
         if context.screen is not None:
@@ -527,15 +787,7 @@ class KAMI_OT_bake(Operator):
         self._path = path
         self._start = settings.frame_start
         self._end = settings.frame_end
-        self._state = {
-            "done": False,
-            "error": None,
-            "completed_frame": self._start - 1,
-            "frame_seconds": [],
-            "final_stats": None,
-            "final_positions": None,
-            "cancelled": False,
-        }
+        self._state = _new_calculation_state(self._start)
         self._thread = threading.Thread(
             target=_calculate_preloaded,
             args=(session, self._start, self._end, fps, path, self._state),
@@ -579,8 +831,13 @@ class KAMI_OT_bake(Operator):
             except Exception as exception:
                 _abort_prepare_scene(self._scene, self._prepare_state)
                 self._stop_modal(context)
-                settings.status = "CUDA準備失敗"
+                last_uploaded = (
+                    settings.frame_start + self._prepare_state["next_frame_index"] - 1)
+                settings.error_detail = _failure_detail(
+                    "CUDAアニメーション転送", exception, completed_frame=last_uploaded)
+                settings.status = f"計算失敗: {settings.error_detail}"
                 self.report({"ERROR"}, str(exception))
+                _append_notification_error(settings, _notify_codex())
                 return {"CANCELLED"}
 
         completed = max(0, self._state["completed_frame"] - self._start + 1)
@@ -606,36 +863,52 @@ class KAMI_OT_bake(Operator):
         if not self._state["done"]:
             return {"RUNNING_MODAL"}
 
+        self._thread.join()
         self._stop_modal(context)
         self._scene.frame_set(self._original_frame)
         if self._state["error"] is not None:
+            _store_resume_record(
+                self._scene_key, self._session, self._start, self._end,
+                self._path, self._state)
+            settings.error_detail = _failure_detail(
+                self._state["error_stage"], self._state["error"],
+                completed_frame=(self._state["completed_frame"]
+                                 if self._state["completed_frame"] >= self._start else None),
+                failed_frame=self._state["failed_frame"],
+                progress=self._state["error_progress"])
             if self._state["cancelled"]:
-                settings.status = "CUDA計算を中止しました"
+                settings.status = f"CUDA計算を中止: {settings.error_detail}"
                 self.report({"WARNING"}, settings.status)
             else:
-                settings.status = "計算失敗"
+                settings.status = f"計算失敗: {settings.error_detail}"
                 self.report({"ERROR"}, str(self._state["error"]))
+                _append_notification_error(settings, _notify_codex())
             return {"CANCELLED"}
 
-        result = self._session["result"]
-        result["髪キャッシュ"] = str(self._path)
-        result["髪開始フレーム"] = self._start
-        result["髪終了フレーム"] = self._end
-        result["髪点数"] = self._session["point_count"]
-        result["髪解法"] = "CUDA・Cosserat FEM・implicit Euler・Gauss-Newton・バリア接触・Coulomb摩擦"
-        if self._state["final_positions"] is not None:
-            _set_hair_positions(result, self._state["final_positions"])
-        final_stats = self._state["final_stats"]
-        if final_stats:
-            gpu_stats = self._session["solver"].gpu_stats()
-            settings.status = (
-                f"CUDA計算完了 {total}フレーム / {_duration_text(elapsed)} / "
-                f"最終残差 {final_stats.final_residual_norm:.3e} / "
-                f"最終GPUフレーム {gpu_stats.last_frame_milliseconds / 1000.0:.2f}秒")
-        else:
-            settings.status = "CUDA計算完了（開始フレームのみ）"
-        self.report({"INFO"}, settings.status)
-        return {"FINISHED"}
+        try:
+            _RESUMABLE_BAKES.pop(self._scene_key, None)
+            _finish_bake_result(
+                self._session, self._path, self._start, self._end,
+                self._state["final_positions"])
+            final_stats = self._state["final_stats"]
+            if final_stats:
+                gpu_stats = self._session["solver"].gpu_stats()
+                settings.status = (
+                    f"CUDA計算完了 {total}フレーム / {_duration_text(elapsed)} / "
+                    f"最終残差 {final_stats.final_residual_norm:.3e} / "
+                    f"最終GPUフレーム {gpu_stats.last_frame_milliseconds / 1000.0:.2f}秒")
+            else:
+                settings.status = "CUDA計算完了（開始フレームのみ）"
+            settings.error_detail = ""
+            _append_notification_error(settings, _notify_codex())
+            self.report({"INFO"}, settings.status)
+            return {"FINISHED"}
+        except Exception as exception:
+            settings.error_detail = _failure_detail("計算完了処理", exception)
+            settings.status = f"計算終了後エラー: {settings.error_detail}"
+            self.report({"ERROR"}, str(exception))
+            _append_notification_error(settings, _notify_codex())
+            return {"CANCELLED"}
 
 
 class KAMI_OT_clear(Operator):
@@ -646,11 +919,17 @@ class KAMI_OT_clear(Operator):
 
     def execute(self, context):
         scene = context.scene
-        if scene.as_pointer() in _ACTIVE_BAKES:
+        scene_key = scene.as_pointer()
+        if scene_key in _ACTIVE_BAKES:
             self.report({"ERROR"}, "CUDA計算中です。Escで中止してから消去してください。")
             return {"CANCELLED"}
         settings = scene.kami_hair
-        session = _SESSIONS.pop(scene.as_pointer(), None)
+        resume = _RESUMABLE_BAKES.pop(scene_key, None)
+        if resume:
+            temporary = resume["path"].with_suffix(resume["path"].suffix + ".未完成")
+            if temporary.exists():
+                temporary.unlink()
+        session = _SESSIONS.pop(scene_key, None)
         if session:
             session["solver"].close()
         result = settings.result
@@ -667,6 +946,7 @@ class KAMI_OT_clear(Operator):
                 path.unlink()
         settings.result = None
         settings.summary = ""
+        settings.error_detail = ""
         settings.status = "未準備"
         return {"FINISHED"}
 
@@ -709,9 +989,20 @@ class KAMI_PT_panel(Panel):
         row = layout.row(align=True)
         row.operator("kami_hair.prepare", icon="MOD_PARTICLES")
         row.operator("kami_hair.bake", icon="PHYSICS")
+        resume_row = layout.row()
+        resume_row.enabled = (
+            context.scene.as_pointer() in _RESUMABLE_BAKES and
+            context.scene.as_pointer() not in _ACTIVE_BAKES)
+        resume_operator = resume_row.operator("kami_hair.bake", text="失敗フレームから再開", icon="PLAY")
+        resume_operator.resume = True
         layout.operator("kami_hair.clear", icon="TRASH")
         layout.separator()
         layout.label(text=f"状態: {settings.status}")
+        if settings.error_detail:
+            box = layout.box()
+            box.label(text="エラー詳細", icon="ERROR")
+            for line in textwrap.wrap(settings.error_detail, width=42):
+                box.label(text=line)
         if settings.summary:
             layout.label(text=settings.summary)
 
@@ -733,6 +1024,7 @@ def unregister():
     for session in _SESSIONS.values():
         session["solver"].close()
     _SESSIONS.clear()
+    _RESUMABLE_BAKES.clear()
     if hasattr(bpy.types.Scene, "kami_hair"):
         del bpy.types.Scene.kami_hair
     for cls in reversed(_CLASSES):

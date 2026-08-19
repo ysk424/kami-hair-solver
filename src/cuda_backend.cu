@@ -357,15 +357,15 @@ public:
             std::vector<DElement>he(element_count_);for(uint32_t i=0;i<element_count_;++i){const auto&s=elements[i];
                 he[i]={s.i,s.j,s.strand,s.collider_contact,s.rest_length,make_vec(s.rest_shear.x,s.rest_shear.y,s.rest_shear.z),
                     make_vec(s.rest_curvature.x,s.rest_curvature.y,s.rest_curvature.z)};}
-            double maximum_rest_length=0.0;for(const auto&e:elements)maximum_rest_length=fmax(maximum_rest_length,e.rest_length);
-            translation_trust_radius_=fmax(0.25*maximum_rest_length,
+            maximum_rest_length_=0.0;for(const auto&e:elements)maximum_rest_length_=fmax(maximum_rest_length_,e.rest_length);
+            translation_trust_radius_=fmax(0.25*maximum_rest_length_,
                 8.0*(material_.radius+material_.collider_offset+material_.barrier_distance));
             std::vector<DStrand>hs(strand_count_);for(uint32_t s=0;s<strand_count_;++s){const auto&indices=strand_nodes[s];uint32_t fixed=0;
                 while(fixed<indices.size()&&nodes[indices[fixed]].fixed)++fixed;hs[s]={indices.front(),uint32_t(indices.size()),fixed};}
             std::vector<DVec3>hcv(collider_count_);for(uint32_t i=0;i<collider_count_;++i)hcv[i]=make_vec(collider_vertices[i].x,collider_vertices[i].y,collider_vertices[i].z);
             std::vector<DTriangle>ht(triangle_count_);for(uint32_t i=0;i<triangle_count_;++i)ht[i]={collider_triangles[i].i0,collider_triangles[i].i1,collider_triangles[i].i2};
 
-            d_nodes_.allocate(node_count_);d_nodes_.upload(hn);d_elements_.allocate(element_count_);d_elements_.upload(he);d_strands_.allocate(strand_count_);d_strands_.upload(hs);
+            host_nodes_=hn;d_nodes_.allocate(node_count_);d_nodes_.upload(host_nodes_);d_elements_.allocate(element_count_);d_elements_.upload(he);d_strands_.allocate(strand_count_);d_strands_.upload(hs);
             d_mapping_.allocate(original_count_);d_mapping_.upload(original_to_internal);
             d_q_.allocate(dof_count_);d_q_.upload(hq.data(),hq.size());d_old_q_.allocate(dof_count_);d_old_q_.upload(hq.data(),hq.size());
             d_snapshot_q_.allocate(dof_count_);d_velocity_.allocate(dof_count_);d_velocity_.upload(hv.data(),hv.size());d_snapshot_velocity_.allocate(dof_count_);
@@ -389,6 +389,29 @@ public:
             initialized_=true;
             return KHS_OK;
         } catch(const std::exception&e){error_=std::string("CUDA initialization: ")+e.what();return KHS_ERROR_INTERNAL;}
+    }
+
+    KhsResult update_runtime_parameters(const KhsSolverDesc&desc,const KhsHairMaterial&material,
+                                        const std::vector<double>&masses,
+                                        const std::vector<double>&rotational_masses) override
+    {
+        try {
+            if(!initialized_||masses.size()!=node_count_||rotational_masses.size()!=node_count_)
+                return fail(KHS_ERROR_INVALID_STATE,"CUDA runtime parameter update has invalid state.");
+            std::vector<DNode>updated=host_nodes_;
+            for(uint32_t i=0;i<node_count_;++i){updated[i].mass=masses[i];updated[i].rotational_mass=rotational_masses[i];}
+            d_nodes_.upload(updated);
+            desc_={make_vec(desc.gravity.x,desc.gravity.y,desc.gravity.z),desc.substeps,desc.newton_iterations,
+                desc.line_search_iterations,desc.absolute_tolerance,desc.relative_tolerance,desc.increment_tolerance,
+                desc.minimum_line_search_step,desc.minimum_gap};
+            material_={material.density,material.radius,material.young_modulus,material.poisson_ratio,
+                material.shear_correction,material.mass_damping,material.contact_stiffness,material.barrier_distance,
+                material.friction,material.friction_smoothing,material.collider_offset};
+            host_nodes_=std::move(updated);
+            translation_trust_radius_=fmax(0.25*maximum_rest_length_,
+                8.0*(material_.radius+material_.collider_offset+material_.barrier_distance));
+            error_.clear();return KHS_OK;
+        }catch(const std::exception&e){return fail(KHS_ERROR_INTERNAL,std::string("CUDA runtime parameter update: ")+e.what());}
     }
 
     KhsResult update_roots(const std::vector<KhsVec3>&positions,const std::vector<KhsVec3>&rotations) override
@@ -624,7 +647,8 @@ private:
 
     cublasHandle_t cublas_=nullptr;cudaEvent_t frame_begin_=nullptr,frame_end_=nullptr;
     DDesc desc_{};DMaterial material_{};uint32_t node_count_=0,element_count_=0,original_count_=0,collider_count_=0,triangle_count_=0,strand_count_=0;size_t dof_count_=0;
-    bool initialized_=false,animation_ready_=false;uint32_t animation_frames_=0,current_animation_frame_=0,leaf_count_=0;double translation_trust_radius_=0.0;
+    bool initialized_=false,animation_ready_=false;uint32_t animation_frames_=0,current_animation_frame_=0,leaf_count_=0;double translation_trust_radius_=0.0,maximum_rest_length_=0.0;
+    std::vector<DNode>host_nodes_;
     std::vector<bool>root_frame_set_,collider_frame_set_;std::vector<std::vector<uint32_t>>bvh_levels_;std::vector<uint32_t>level_offsets_;
     DeviceBuffer<DNode>d_nodes_;DeviceBuffer<DElement>d_elements_;DeviceBuffer<DStrand>d_strands_;DeviceBuffer<uint32_t>d_mapping_;
     DeviceBuffer<double>d_q_,d_old_q_,d_snapshot_q_,d_velocity_,d_snapshot_velocity_,d_gradient_,d_direction_,d_preconditioner_,d_base_q_,d_friction_delta_;

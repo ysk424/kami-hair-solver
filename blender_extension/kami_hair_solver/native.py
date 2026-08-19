@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
-ABI_VERSION = 3
+ABI_VERSION = 4
 OK = 0
 
 
@@ -193,6 +193,9 @@ class HairSolver:
         lib.khsSetColliderMesh.restype = ctypes.c_int
         lib.khsBuild.argtypes = [ctypes.c_void_p]
         lib.khsBuild.restype = ctypes.c_int
+        lib.khsUpdateRuntimeParameters.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(SolverDesc), ctypes.POINTER(HairMaterial)]
+        lib.khsUpdateRuntimeParameters.restype = ctypes.c_int
         lib.khsUpdateColliderVertices.argtypes = [ctypes.c_void_p, ctypes.POINTER(Vec3), ctypes.c_uint32]
         lib.khsUpdateColliderVertices.restype = ctypes.c_int
         lib.khsUpdateRootTargets.argtypes = [ctypes.c_void_p, ctypes.POINTER(Vec3), ctypes.c_uint32]
@@ -272,6 +275,10 @@ class HairSolver:
         stats.struct_size = ctypes.sizeof(stats)
         self._check(self._library.khsGetBuildStats(self._handle, ctypes.byref(stats)))
         return stats
+
+    def update_runtime_parameters(self):
+        self._check(self._library.khsUpdateRuntimeParameters(
+            self._handle, ctypes.byref(self.desc), ctypes.byref(self.material)))
 
     def update_roots(self, points):
         _storage, values = _vec_array(points)

@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "kami_hair_solver"
-version = "0.3.1"
+version = "0.4.0"
 name = "髪"
 tagline = "CUDA Hair Curves非線形有限要素接触ソルバー"
 maintainer = "Kami Hair Solver contributors"
@@ -11,3 +11,4 @@ platforms = ["windows-x64"]
 
 [permissions]
 files = "髪の計算結果を専用バイナリキャッシュへ保存します"
+network = "計算完了または失敗時にローカルの8765/UDPへ通知します"

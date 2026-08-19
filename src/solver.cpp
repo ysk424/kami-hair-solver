@@ -555,6 +555,56 @@ KhsResult Solver::build()
     return KHS_OK;
 }
 
+KhsResult Solver::update_runtime_parameters(const KhsSolverDesc &desc,
+                                            const KhsHairMaterial &material)
+{
+    if (!built_ || !cuda_) {
+        error_ = "実行時パラメーターを更新する前にソルバーを構築してください。";
+        return KHS_ERROR_INVALID_STATE;
+    }
+    if (desc.maximum_element_length != desc_.maximum_element_length ||
+        desc.minimum_dynamic_length != desc_.minimum_dynamic_length ||
+        desc.fixed_root_nodes != desc_.fixed_root_nodes) {
+        error_ =
+            "再開中は最大要素長、最小動力学長、固定する毛根節点数を変更できません。"
+            "これらを変更する場合は最初から計算してください。";
+        return KHS_ERROR_INVALID_ARGUMENT;
+    }
+    if (!(material.density > 0.0 && material.radius > 0.0 &&
+          material.young_modulus > 0.0 && material.poisson_ratio > -1.0 &&
+          material.poisson_ratio < 0.5 && material.shear_correction > 0.0 &&
+          material.mass_damping >= 0.0 && material.contact_stiffness > 0.0 &&
+          material.barrier_distance > 0.0 && material.friction >= 0.0 &&
+          material.friction_smoothing > 0.0 && material.collider_offset >= 0.0)) {
+        error_ = "再開用の髪材料値が許容範囲外です。";
+        return KHS_ERROR_INVALID_ARGUMENT;
+    }
+
+    const KhsSolverDesc old_desc = desc_;
+    const KhsHairMaterial old_material = material_;
+    desc_ = desc;
+    material_ = material;
+    initialize_masses();
+
+    std::vector<double> masses(nodes_.size());
+    std::vector<double> rotational_masses(nodes_.size());
+    for (size_t i = 0; i < nodes_.size(); ++i) {
+        masses[i] = nodes_[i].mass;
+        rotational_masses[i] = nodes_[i].rotational_mass;
+    }
+    const KhsResult result = cuda_->update_runtime_parameters(
+        desc_, material_, masses, rotational_masses);
+    if (result != KHS_OK) {
+        desc_ = old_desc;
+        material_ = old_material;
+        initialize_masses();
+        error_ = cuda_->last_error();
+        return result;
+    }
+    error_.clear();
+    return KHS_OK;
+}
+
 bool Solver::point_inside_closed_collider(const Vec3 &point) const
 {
     uint32_t hits = 0;

@@ -45,6 +45,17 @@ bool valid_desc(const KhsSolverDesc *desc)
         desc->fixed_root_nodes > 0;
 }
 
+bool valid_material(const KhsHairMaterial *material)
+{
+    return material && material->struct_size >= sizeof(KhsHairMaterial) &&
+        material->density > 0.0 && material->radius > 0.0 &&
+        material->young_modulus > 0.0 && material->poisson_ratio > -1.0 &&
+        material->poisson_ratio < 0.5 && material->shear_correction > 0.0 &&
+        material->mass_damping >= 0.0 && material->contact_stiffness > 0.0 &&
+        material->barrier_distance > 0.0 && material->friction >= 0.0 &&
+        material->friction_smoothing > 0.0 && material->collider_offset >= 0.0;
+}
+
 } // namespace
 
 extern "C" {
@@ -133,6 +144,15 @@ KhsResult khsSetColliderMesh(KhsSolver *solver, const KhsVec3 *vertices,
 KhsResult khsBuild(KhsSolver *solver)
 {
     return guarded(solver, [&] { return solver->implementation.build(); });
+}
+
+KhsResult khsUpdateRuntimeParameters(KhsSolver *solver, const KhsSolverDesc *desc,
+                                      const KhsHairMaterial *material)
+{
+    if (!valid_desc(desc) || !valid_material(material)) return KHS_ERROR_INVALID_ARGUMENT;
+    return guarded(solver, [&] {
+        return solver->implementation.update_runtime_parameters(*desc, *material);
+    });
 }
 
 KhsResult khsUpdateColliderVertices(KhsSolver *solver, const KhsVec3 *vertices,

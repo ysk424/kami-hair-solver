@@ -33,6 +33,16 @@ void test_rest_state_and_subdivision()
     require(solver, khsSetHairCurves(solver, points, 3, offsets, 1, &material));
     require(solver, khsBuild(solver));
     assert(khsGetInternalNodeCount(solver) == 5);
+    desc.substeps = 2;
+    desc.newton_iterations = 32;
+    material.density = 1400.0;
+    material.radius = 5.0e-5;
+    material.young_modulus = 2.0e9;
+    require(solver, khsUpdateRuntimeParameters(solver, &desc, &material));
+    KhsSolverDesc structural_change = desc;
+    structural_change.maximum_element_length = 0.007;
+    assert(khsUpdateRuntimeParameters(solver, &structural_change, &material) ==
+           KHS_ERROR_INVALID_ARGUMENT);
     require(solver, khsStep(solver, 1.0 / 24.0));
     KhsVec3 output[3];
     require(solver, khsCopyOriginalPositions(solver, output, 3));

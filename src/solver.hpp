@@ -78,6 +78,8 @@ public:
     KhsResult set_collider(const KhsVec3 *vertices, uint32_t vertex_count,
                            const KhsTriangle *triangles, uint32_t triangle_count);
     KhsResult build();
+    KhsResult update_runtime_parameters(const KhsSolverDesc &desc,
+                                        const KhsHairMaterial &material);
     KhsResult update_collider(const KhsVec3 *vertices, uint32_t vertex_count);
     KhsResult update_roots(const KhsVec3 *points, uint32_t point_count);
     KhsResult step(double frame_dt);

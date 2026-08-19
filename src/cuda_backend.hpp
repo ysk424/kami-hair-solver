@@ -53,6 +53,12 @@ public:
         const std::vector<KhsVec3> &collider_vertices,
         const std::vector<CudaTriangleInit> &collider_triangles) = 0;
 
+    virtual KhsResult update_runtime_parameters(
+        const KhsSolverDesc &desc,
+        const KhsHairMaterial &material,
+        const std::vector<double> &node_masses,
+        const std::vector<double> &node_rotational_masses) = 0;
+
     virtual KhsResult update_roots(const std::vector<KhsVec3> &positions,
                                    const std::vector<KhsVec3> &rotations) = 0;
     virtual KhsResult update_collider(const KhsVec3 *vertices, uint32_t count) = 0;
