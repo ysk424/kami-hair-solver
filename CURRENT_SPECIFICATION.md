@@ -1,15 +1,15 @@
 # Kami Hair Solver — Current Specification
 
-**Software version:** 0.6.1<br>
+**Software version:** 0.6.2<br>
 **C ABI version:** 5<br>
 **Document status:** Current, as-built specification<br>
 **License:** GPL-3.0-or-later
 
 ## 1. Purpose and authority
 
-This document describes the behavior implemented in Kami Hair Solver version 0.6.1. It is an as-built record of the current research software, not an initial requirements document or a promise of future behavior. Earlier research plans and design specifications are superseded by this document. If this document and the version 0.6.1 source disagree, the source is authoritative and this document must be corrected.
+This document describes the behavior implemented in Kami Hair Solver version 0.6.2. It is an as-built record of the current research software, not an initial requirements document or a promise of future behavior. Earlier research plans and design specifications are superseded by this document. If this document and the version 0.6.2 source disagree, the source is authoritative and this document must be corrected.
 
-Kami Hair Solver computes Blender Hair Curves as geometrically nonlinear Cosserat rods with rotational degrees of freedom, implicit time integration, finite-element elasticity, barrier contact, and post-solve Coulomb friction. The production solver is CUDA-only. It does not use PBD, XPBD, position-constraint projection, or a CPU solver fallback.
+Kami Hair Solver computes Blender Hair Curves as geometrically nonlinear Cosserat rods with rotational degrees of freedom, implicit time integration, finite-element elasticity, barrier contact, and post-solve normal/Coulomb contact impulses. The production solver is CUDA-only. It does not use PBD, XPBD, position-constraint projection, or a CPU solver fallback.
 
 ## 2. Supported environment
 
@@ -22,7 +22,7 @@ Kami Hair Solver computes Blender Hair Curves as geometrically nonlinear Cossera
 - Linear algebra dependency: Eigen 3.3 or newer on the host and cuBLAS on the GPU.
 - Numerical precision: double precision for solver state, geometry, cache coordinates, and CUDA computation.
 
-The release build produces `kami_hair_solver.dll` and the Blender Extension archive `kami_hair_solver-0.6.1-windows-x64.zip`.
+The release build produces `kami_hair_solver.dll` and the Blender Extension archive `kami_hair_solver-0.6.2-windows-x64.zip`.
 
 ## 3. Components
 
@@ -60,7 +60,7 @@ Reference frames are initialized from strand tangents and propagated by parallel
 
 The first `fixed_root_nodes` internal nodes of every strand, limited by the strand's node count, are Dirichlet nodes. Their animated positions are evaluated from the original Hair Curves through stored source-point bindings. Their orientations are reconstructed from animated tangents and parallel-transported frames.
 
-An element whose left node is fixed is excluded from barrier contact, moving-collider sweep tests, and line-search CCD. Friction skips elements only when both endpoints are fixed. This behavior keeps the scalp-embedded fixed portion out of the nonlinear contact solve while allowing a boundary element with one free endpoint to receive a friction impulse.
+An element whose left node is fixed is excluded from barrier contact, relative-motion sweep tests, and line-search CCD. Contact impulses skip elements only when both endpoints are fixed. This behavior keeps the scalp-embedded fixed portion out of the nonlinear contact solve while allowing a boundary element with one free endpoint to receive a normal/friction impulse.
 
 ### 5.3 Minimum dynamic length and invisible extension
 
@@ -77,7 +77,7 @@ The invisible section is a deliberate surrogate model, not the physical model of
 - gravity; and
 - dynamic coupling to the visible prefix.
 
-The invisible section does not participate in collider interaction. This exclusion applies to initial inside/intersection checks, barrier energy, contact Hessian approximation, moving-collider sweep tests, line-search CCD, and Coulomb friction. The boundary element from the visible tip to the first invisible node is also excluded. The preceding fully visible element still supplies contact at the visible tip.
+The invisible section does not participate in collider interaction. This exclusion applies to initial inside/intersection checks, barrier energy, contact Hessian approximation, relative-motion sweep tests, line-search CCD, and normal/Coulomb contact impulses. The boundary element from the visible tip to the first invisible node is also excluded. The preceding fully visible element still supplies contact at the visible tip.
 
 Invisible nodes are never written to the Blender result object or `.khc` cache.
 
@@ -92,29 +92,29 @@ The time step is formulated as an incremental potential containing:
 
 The material model uses density, physical radius, Young's modulus, Poisson ratio, and a shear-correction factor. Circular cross-section area, second moment, and polar moment are derived from the physical radius. The model has shear/stretch, bend, and twist response. It has no XPBD compliance, constraint projection, plasticity, or strand-level shape matching.
 
-Gravity enters the implicit prediction. Friction is not included in the nonlinear potential; it is applied after a converged substep as a smoothed Coulomb impulse.
+Gravity enters the implicit prediction. Contact impulses are not included in the nonlinear potential. After a converged interval, a normal impulse removes closing hair-to-collider velocity and a smoothed Coulomb impulse limits tangential slip.
 
 ## 7. Nonlinear solution
 
 For each time interval, the CUDA backend:
 
 1. proposes the remaining span of the configured base interval;
-2. uses conservative advancement to limit that span to a safe moving-collider TOI;
+2. predicts hair translation from velocity and gravity, then uses conservative advancement to limit the relative hair-collider trajectory to a safe TOI;
 3. advances the animated roots and collider to the same limited end time;
-4. predicts free-node motion using the corresponding physical `dt`;
+4. initializes free nodes at the same collision-checked velocity-and-gravity prediction using the corresponding physical `dt`;
 5. assembles the incremental potential, gradient, and a positive Gauss-Newton block approximation;
 6. solves a per-strand block-tridiagonal linear system;
 7. falls back to a diagonally preconditioned steepest-descent direction if the block direction fails or is not a descent direction;
 8. limits excessive translation by a trust radius;
 9. limits the hair search direction with segment-triangle CCD;
 10. performs Armijo backtracking line search; and
-11. updates velocity, applies friction, and continues the unconsumed frame time.
+11. updates velocity, removes closing normal relative velocity, applies friction, and continues the unconsumed frame time.
 
 The nonlinear solve fails when it starts outside the barrier-feasible region or cannot find an acceptable line-search step. Reaching the configured Newton iteration budget by itself accepts the last feasible iterate. Cancellation is checked during nonlinear iterations.
 
 ### 7.1 TOI-limited variable time steps and rollback
 
-The configured base substep count partitions each animation frame into nominal intervals. Inside a nominal interval, moving-collider conservative advancement computes a safe temporal fraction before contact. Its safety clearance preserves 10% of the clearance present at the beginning of that proposal, capped by the larger of four minimum gaps and one quarter of the barrier distance; it therefore remains positive without demanding clearance that an already-active contact does not have. The collider, root constraints, implicit prediction, velocity update, and friction all use that same fraction, so prescribed and simulated motion remain on one physical clock. The unconsumed portion is then proposed again instead of uniformly subdividing the whole frame.
+The configured base substep count partitions each animation frame into nominal intervals. Inside a nominal interval, conservative advancement evaluates the collider trajectory together with the hair trajectory predicted from its current velocity and gravity, and computes a safe temporal fraction before contact. Its safety clearance preserves 10% of the clearance present at the beginning of that proposal, capped by the larger of four minimum gaps and one quarter of the barrier distance; it therefore remains positive without demanding clearance that an already-active contact does not have. The collision-checked hair prediction is also the Newton initial iterate. The collider, root constraints, implicit prediction, velocity update, and contact impulses all use that same fraction, so prescribed and simulated motion remain on one physical clock. The unconsumed portion is then proposed again instead of uniformly subdividing the whole frame.
 
 Positions, velocities, and the collider pose are snapshotted before each accepted variable interval. A nonlinear failure restores only that interval and retries a half-sized span. A fatal error restores the complete frame snapshot. With a collider, the separately configured variable-time-step maximum bounds accepted intervals and local retry attempts; without a collider, the base partition is used directly. The Blender default is 8 base intervals and a maximum of 32; both fields accept explicit values up to 4096. Exhausting the budget or collapsing below the minimum temporal fraction returns an error and leaves the frame rolled back.
 
@@ -140,13 +140,14 @@ The gap is
 
 The state is infeasible when the gap is not greater than `minimum_gap`. For a feasible gap below `barrier_distance`, a logarithmic barrier contributes energy, gradient, and a rank-one positive curvature approximation. The user contact stiffness is a lower bound; the active stiffness is also projected from the contact-point effective mass, physical time interval, and current gap. The mass-over-gap-squared term follows the PPF contact scaling and prevents successively shorter TOI intervals from making contact too weak to advance the hair.
 
-### 8.3 Continuous checks and friction
+### 8.3 Continuous checks and contact impulses
 
-- Moving-collider conservative advancement limits each proposed interval to a safe TOI before solving that interval.
+- Relative-motion conservative advancement sweeps both the predicted hair and animated collider and limits each proposed interval to a safe TOI before solving that interval.
 - Line-search CCD limits hair displacement against the current collider.
 - Both checks ignore fixed-root elements and invisible-extension elements.
+- The post-solve normal impulse prevents a contacting hair point from retaining a velocity into the collider and transfers the collider's normal surface velocity to the hair.
 - Friction uses hair velocity relative to the animated collider surface velocity.
-- The friction impulse is bounded by the Coulomb coefficient and an estimate of the barrier normal force.
+- The friction impulse is bounded by the Coulomb coefficient and the larger of the normal collision impulse and an estimate of the barrier normal impulse.
 - Hair-hair and strand self-collision are not implemented.
 
 ## 9. GPU-resident animation
@@ -185,7 +186,7 @@ The debug-resume box accepts an absolute resume frame inside the retained checkp
 
 Successful completion and non-cancellation errors send `PING` to `127.0.0.1:8765/UDP` and expect `PONG`. Notification failure is displayed without changing the simulation result.
 
-The removed collider-inspection-copy operator is not part of version 0.6.1.
+The removed collider-inspection-copy operator is not part of version 0.6.2.
 
 ## 11. Default parameters
 
@@ -254,7 +255,7 @@ The bake writes to a sibling file with the suffix `.未完成`. The final cache 
 - Animation checkpoint APIs return the required opaque byte count and save or restore a frame-boundary state in the same live solver.
 - Failure diagnostics identify moving-collider sweep failures and expose attempted variable intervals, TOI-limited attempts, and geometric detection data.
 
-Some ABI fields are reserved by the present implementation: `objective_change`, `friction_energy`, `peak_temporary_bytes`, and the assembly/collision/optimization timing breakdown are not populated with independent measurements in version 0.6.1.
+Some ABI fields are reserved by the present implementation: `objective_change`, `friction_energy`, `peak_temporary_bytes`, and the assembly/collision/optimization timing breakdown are not populated with independent measurements in version 0.6.2.
 
 ## 14. Failure behavior and limitations
 
@@ -264,13 +265,13 @@ Some ABI fields are reserved by the present implementation: `objective_change`, 
 - A difficult visible contact state may fail Gauss-Newton line search.
 - Resume is available only inside the bounded in-memory checkpoint range and while the Blender session and its GPU solver remain alive; reopening Blender requires a new bake.
 - Checkpoint memory is approximately two arrays of six doubles per internal node for every retained state. The panel reports an estimate for the configured history.
-- Although the Blender frame properties currently permit negative values, the version 0.6.1 cache header stores frame indices as unsigned 32-bit integers; attempting to bake a negative frame range fails during cache-header encoding.
+- Although the Blender frame properties currently permit negative values, the version 0.6.2 cache header stores frame indices as unsigned 32-bit integers; attempting to bake a negative frame range fails during cache-header encoding.
 - Hair-hair collision, self-collision, aerodynamic drag, wind, plasticity, cutting, remeshing during animation, and topology changes are not implemented.
 - Contact uses the closest collider triangle per rod element in an evaluation rather than assembling multiple simultaneous triangle contacts for that element.
 - The release has no CPU fallback and no binaries for architectures other than Windows x64 / `sm_120`.
 - Minimum dynamic length deliberately changes the dynamics of short visible hair and must be treated as an artist-selected surrogate parameter.
 
-## 15. Version 0.6.1 verification record
+## 15. Version 0.6.2 verification record
 
 The following checks passed for the source represented by this specification:
 
@@ -278,11 +279,11 @@ The following checks passed for the source represented by this specification:
 - public C API test suite;
 - Blender Extension smoke test using Blender 5.2;
 - opaque CUDA checkpoint save/restore determinism and backward-cache truncation tests;
-- moving-collider failure diagnostics, explicit variable-time-step ceiling tests, a 20 cm moving-collider crossing regression using ordinary material values, and an active-contact regression whose existing clearance is smaller than the maximum TOI safety clearance;
+- moving-collider failure diagnostics, explicit variable-time-step ceiling tests, a 20 cm moving-collider crossing regression using ordinary material values, an active-contact regression whose existing clearance is smaller than the maximum TOI safety clearance, and a multi-frame 0.44 mm/frame normal-velocity transfer regression using the Blender default material scale;
 - static intersection and moving-collider regression tests proving that invisible extension creates no collider candidates while visible contact tests remain active; and
 - Blender 5.2 extension packaging and installation smoke tests.
 
-The preceding 0.5.1 production-scene baseline used 6,757 strands, 74,327 visible points, 278,919 internal nodes, 272,162 elements, and `minimum_dynamic_length = 0.2 m`. It created 13,811 invisible nodes on 1,408 strands with 131.016 m total invisible rest length. With 8 base substeps and 24 Newton iterations on an RTX 5070 Ti, all 30 frames completed. Preparation took approximately 17.95 seconds and dynamic stepping took approximately 194.65 seconds; resident GPU allocation was approximately 1.003 GiB. This historical baseline has not yet been rerun with the 0.6.1 variable-time-step algorithm and is not a performance guarantee.
+The preceding 0.5.1 production-scene baseline used 6,757 strands, 74,327 visible points, 278,919 internal nodes, 272,162 elements, and `minimum_dynamic_length = 0.2 m`. It created 13,811 invisible nodes on 1,408 strands with 131.016 m total invisible rest length. With 8 base substeps and 24 Newton iterations on an RTX 5070 Ti, all 30 frames completed. Preparation took approximately 17.95 seconds and dynamic stepping took approximately 194.65 seconds; resident GPU allocation was approximately 1.003 GiB. This historical baseline has not yet been rerun with the 0.6.2 variable-time-step algorithm and is not a performance guarantee.
 
 ## 16. Licensing
 

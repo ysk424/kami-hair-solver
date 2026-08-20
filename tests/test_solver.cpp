@@ -389,6 +389,60 @@ void test_moving_collider_preserves_small_existing_clearance()
     khsDestroy(solver);
 }
 
+void test_moving_collider_transfers_normal_velocity_to_hair()
+{
+    KhsSolverDesc desc;
+    khsDefaultSolverDesc(&desc);
+    desc.gravity = {0.0, 0.0, 0.0};
+    desc.substeps = 8;
+    desc.maximum_substeps = 32;
+    desc.fixed_root_nodes = 1;
+    desc.maximum_element_length = 1.0;
+    KhsSolver *solver = khsCreate(&desc);
+    assert(solver);
+    KhsHairMaterial material;
+    khsDefaultHairMaterial(&material);
+    material.radius = 4.0e-5;
+    material.young_modulus = 4.0e9;
+    material.contact_stiffness = 1.0e4;
+    material.barrier_distance = 2.0e-4;
+    const KhsVec3 points[]{{-0.02, 0.0, 0.02}, {-0.01, 0.0, 0.0}, {0.01, 0.0, 0.02}};
+    const uint32_t offsets[]{0, 3};
+    KhsVec3 collider[]{{-1.0, -1.0, -9.0e-5}, {1.0, -1.0, -9.0e-5}, {0.0, 1.0, -9.0e-5}};
+    const KhsTriangle triangle[]{0, 1, 2};
+    require(solver, khsSetHairCurves(solver, points, 3, offsets, 1, &material));
+    require(solver, khsSetColliderMesh(solver, collider, 3, triangle, 1));
+    require(solver, khsBuild(solver));
+    for (int frame = 0; frame < 3; ++frame) {
+        for (auto &vertex : collider) vertex.z += 4.4e-4;
+        require(solver, khsUpdateColliderVertices(solver, collider, 3));
+        const KhsResult result = khsStep(solver, 1.0 / 24.0);
+        if (result != KHS_OK) {
+            KhsFailureDiagnostics diagnostics{};
+            diagnostics.struct_size = sizeof(diagnostics);
+            require(solver, khsGetFailureDiagnostics(solver, &diagnostics));
+            KhsStepStats failed_stats{};
+            failed_stats.struct_size = sizeof(failed_stats);
+            require(solver, khsGetLastStepStats(solver, &failed_stats));
+            std::fprintf(stderr,
+                         "normal transport frame=%d: %s kind=%u attempted=%u limited=%u "
+                         "accepted=%u gap=%.12g residual=%.12g alpha=%.12g\n",
+                         frame, khsGetLastError(solver), diagnostics.kind,
+                         diagnostics.attempted_substeps,
+                         diagnostics.adaptive_attempt_count, failed_stats.substeps,
+                         failed_stats.minimum_gap, failed_stats.final_residual_norm,
+                         failed_stats.accepted_step_length);
+        }
+        require(solver, result);
+    }
+    KhsStepStats stats{};
+    stats.struct_size = sizeof(stats);
+    require(solver, khsGetLastStepStats(solver, &stats));
+    assert(stats.phase == KHS_PHASE_FINISHED);
+    assert(stats.minimum_gap > desc.minimum_gap);
+    khsDestroy(solver);
+}
+
 void test_gpu_resident_animation()
 {
     KhsSolverDesc desc;
@@ -458,6 +512,7 @@ int main()
     test_moving_collider_tunnelling_rejected();
     test_moving_collider_uses_variable_toi_steps();
     test_moving_collider_preserves_small_existing_clearance();
+    test_moving_collider_transfers_normal_velocity_to_hair();
     test_gpu_resident_animation();
     std::puts("Kami Hair Solver tests passed");
     return 0;
