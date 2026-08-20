@@ -43,7 +43,7 @@ _FAILURE_KIND_NAMES = {
 }
 _PARAMETER_INFO = {
     "substeps": ("基本サブステップ", "same_frame"),
-    "maximum_substeps": ("適応サブステップ上限", "same_frame"),
+    "maximum_substeps": ("可変時間ステップ上限", "same_frame"),
     "newton_iterations": ("Newton反復上限", "same_frame"),
     "density": ("密度", "rewind"),
     "radius": ("物理半径", "rewind"),
@@ -93,8 +93,8 @@ class HairSettings(PropertyGroup):
     frame_end: IntProperty(name="終了フレーム", default=30, min=-1048574, max=1048574)
     substeps: IntProperty(name="基本サブステップ", default=8, min=1, max=4096)
     maximum_substeps: IntProperty(
-        name="適応サブステップ上限",
-        description="移動コライダー横切りや求解失敗時に自動増加できる上限",
+        name="可変時間ステップ上限",
+        description="TOI制限や求解失敗の局所再試行を含め、1フレームで使用できる時間区間の上限",
         min=1, max=4096, get=_get_maximum_substeps, set=_set_maximum_substeps)
     newton_iterations: IntProperty(name="Newton反復上限", default=24, min=2, max=100)
     checkpoint_frames: IntProperty(
@@ -183,20 +183,6 @@ def _parameter_history_line(resume_frame, changes):
     return f"フレーム{resume_frame}から再開: {detail}"
 
 
-def _adaptive_sequence(initial, attempted, maximum):
-    if initial < 1 or attempted < 1:
-        return []
-    sequence = [initial]
-    while sequence[-1] < attempted:
-        next_value = min(maximum, sequence[-1] * 2)
-        if next_value <= sequence[-1]:
-            break
-        sequence.append(next_value)
-    if sequence[-1] != attempted:
-        sequence.append(attempted)
-    return sequence
-
-
 def _vec_text(value):
     return f"({value[0]:.5f}, {value[1]:.5f}, {value[2]:.5f}) m"
 
@@ -256,20 +242,17 @@ def _failure_detail(stage, exception, *, completed_frame=None, failed_frame=None
         phase = _PROGRESS_PHASE_NAMES.get(progress["phase"], f"フェーズ{progress['phase']}")
         parts.append(phase)
         if progress["substep_count"]:
-            parts.append(f"サブステップ {progress['substep']}/{progress['substep_count']}")
+            parts.append(f"可変時間ステップ {progress['substep']}/{progress['substep_count']}")
         if progress["iteration"]:
             parts.append(f"Newton反復 {progress['iteration']}/{progress['iteration_limit']}")
         failure = progress.get("failure")
         if failure:
             kind = _FAILURE_KIND_NAMES.get(failure["kind"], f"失敗種別{failure['kind']}")
             parts.append(kind)
-            sequence = _adaptive_sequence(
-                failure["requested_substeps"], failure["attempted_substeps"],
-                failure["maximum_substeps"])
-            if sequence:
-                parts.append(
-                    "適応サブステップ " + "→".join(str(value) for value in sequence) +
-                    f"（上限{failure['maximum_substeps']}）")
+            parts.append(
+                f"可変時間ステップ 試行{failure['attempted_substeps']} / "
+                f"TOI制限{failure['adaptive_attempt_count']} / "
+                f"基本{failure['requested_substeps']} / 上限{failure['maximum_substeps']}")
             if failure["strand_index"] != _UINT32_MAX:
                 parts.append(
                     f"髪ストランド{failure['strand_index'] + 1} / "
@@ -280,13 +263,13 @@ def _failure_detail(stage, exception, *, completed_frame=None, failed_frame=None
                     f"必要距離 {failure['required_distance'] * 1000.0:.4f} mm / "
                     f"余裕 {failure['clearance'] * 1000.0:.4f} mm")
                 parts.append(
-                    f"対象面移動 {failure['collider_substep_displacement'] * 1000.0:.4f} mm/サブステップ / "
+                    f"対象面安全移動 {failure['collider_substep_displacement'] * 1000.0:.4f} mm/時間区間 / "
                     f"{failure['collider_frame_displacement'] * 1000.0:.3f} mm/フレーム")
                 parts.append(
                     f"髪区間 {_vec_text(failure['hair_start'])}→{_vec_text(failure['hair_end'])} / "
                     f"コライダー位置 {_vec_text(failure['collider_point'])}")
             if failure["kind"] == 1:
-                parts.append("推奨: 適応上限を増やすか、数フレーム戻して接触パラメータを調整してください")
+                parts.append("推奨: 可変時間ステップ上限を増やすか、数フレーム戻して接触パラメータを調整してください")
     parts.append(f"{type(exception).__name__}: {exception}")
     return " / ".join(parts)
 
@@ -421,7 +404,7 @@ def _begin_prepare_scene(scene):
     if settings.frame_end < settings.frame_start:
         raise RuntimeError("終了フレームは開始フレーム以降にしてください。")
     if settings.maximum_substeps < settings.substeps:
-        raise RuntimeError("適応サブステップ上限は基本サブステップ以上にしてください。")
+        raise RuntimeError("可変時間ステップ上限は基本サブステップ以上にしてください。")
     original_frame = scene.frame_current
     scene.frame_set(settings.frame_start)
     depsgraph = bpy.context.evaluated_depsgraph_get()
@@ -953,7 +936,7 @@ class KAMI_OT_bake(Operator):
             if settings.frame_start != record["start"] or settings.frame_end != record["end"]:
                 raise RuntimeError("再開中は開始フレームと終了フレームを変更できません。")
             if settings.maximum_substeps < settings.substeps:
-                raise RuntimeError("適応サブステップ上限は基本サブステップ以上にしてください。")
+                raise RuntimeError("可変時間ステップ上限は基本サブステップ以上にしてください。")
             path = Path(bpy.path.abspath(settings.cache_path))
             if path != record["path"]:
                 raise RuntimeError("再開中は髪キャッシュの保存先を変更できません。")
@@ -1113,7 +1096,7 @@ class KAMI_OT_bake(Operator):
         try:
             native_progress = self._session["solver"].progress()
             detail = (
-                f"サブステップ {native_progress.substep}/{native_progress.substep_count} / "
+                f"可変時間ステップ {native_progress.substep}/{native_progress.substep_count} / "
                 f"反復 {native_progress.nonlinear_iteration}/{native_progress.nonlinear_iteration_limit}")
         except Exception:
             detail = "GPU状態取得中"

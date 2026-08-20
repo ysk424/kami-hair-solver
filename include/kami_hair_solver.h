@@ -61,7 +61,9 @@ typedef enum KhsProgressPhase {
 typedef struct KhsSolverDesc {
     uint32_t struct_size;
     KhsVec3 gravity;
+    /* 1フレームを分ける基本区間数。 */
     uint32_t substeps;
+    /* TOI制限と局所再試行を含む、1フレームの可変時間区間上限。 */
     uint32_t maximum_substeps;
     uint32_t newton_iterations;
     uint32_t line_search_iterations;
@@ -186,8 +188,10 @@ typedef struct KhsFailureDiagnostics {
     uint32_t frame_index;
     uint32_t substep;
     uint32_t requested_substeps;
+    /* 失敗までに試した可変時間区間の総数。 */
     uint32_t attempted_substeps;
     uint32_t maximum_substeps;
+    /* TOIによって提案区間が制限された回数。ABI互換のため名称を維持する。 */
     uint32_t adaptive_attempt_count;
     uint32_t strand_index;
     uint32_t element_index;
