@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "kami_hair_solver"
-version = "0.6.0"
+version = "0.6.1"
 name = "髪"
 tagline = "CUDA Hair Curves非線形有限要素接触ソルバー"
 maintainer = "Kami Hair Solver contributors"

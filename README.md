@@ -2,7 +2,7 @@
 
 Blender 5.2 の Hair Curves を、回転自由度付きの幾何学的非線形 Cosserat ロッド有限要素として計算する Windows x64 DLL と Blender Extension です。
 
-Version 0.6.0 の実装済み挙動は、英語版の [Current Specification](CURRENT_SPECIFICATION.md) に記録しています。これは初期要求ではなく、現行コードのas-built仕様です。
+Version 0.6.1 の実装済み挙動は、英語版の [Current Specification](CURRENT_SPECIFICATION.md) に記録しています。これは初期要求ではなく、現行コードのas-built仕様です。
 
 この実装は PBD／XPBD／位置拘束投影を使用しません。慣性、ロッド弾性、バリア接触をCUDA上の増分ポテンシャルとして評価し、ストランド並列Gauss-Newton、BVH、TOI制限付き可変時間ステップ、CCD line searchで実行可能解を求めます。摩擦は非線形系を不安定化させないGPU Coulombインパルスとして各時間区間後に適用します。CPUソルバーへのフォールバックはありません。
 
@@ -28,7 +28,7 @@ cmake --build build-cuda --target blender-extension-test
 cmake --build build-cuda --target blender-extension
 ```
 
-CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.6.0-windows-x64.zip` です。
+CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.6.1-windows-x64.zip` です。
 
 ## Blender での使用
 

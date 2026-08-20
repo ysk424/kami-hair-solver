@@ -1018,13 +1018,17 @@ __global__ void moving_sweep_kernel(const double*q,const DNode*nodes,const DElem
     const uint32_t ei=blockIdx.x*blockDim.x+threadIdx.x;if(ei>=element_count)return;const DElement&e=elements[ei];if(nodes[e.i].fixed||!e.collider_contact)return;
     const DVec3 p0=make_vec(q[6*e.i],q[6*e.i+1],q[6*e.i+2]),p1=make_vec(q[6*e.j],q[6*e.j+1],q[6*e.j+2]);
     const double target=material.radius+material.collider_offset+desc.minimum_gap;
-    const double parking_clearance=fmax(4.0*desc.minimum_gap,0.25*material.barrier_distance);
+    const double maximum_parking_clearance=fmax(4.0*desc.minimum_gap,0.25*material.barrier_distance);
     query_bvh(bvh,order,min_vec(p0,p1),max_vec(p0,p1),target,[&](uint32_t ti){
         const DTriangle&t=triangles[ti];const DVec3 da=collider[t.i0]-old_collider[t.i0],db=collider[t.i1]-old_collider[t.i1],dc=collider[t.i2]-old_collider[t.i2];
-        const double speed=fmax(norm(da),fmax(norm(db),norm(dc)));if(speed<1e-30)return;double alpha=0;bool end=false;ClosestPair pair{};DVec3 a{},b{},c{};
+        const double speed=fmax(norm(da),fmax(norm(db),norm(dc)));if(speed<1e-30)return;double alpha=0,initial_clearance=0;bool end=false;ClosestPair pair{};DVec3 a{},b{},c{};
         for(int k=0;k<80;++k){a=old_collider[t.i0]+da*alpha;b=old_collider[t.i1]+db*alpha;c=old_collider[t.i2]+dc*alpha;pair=closest_segment_triangle(p0,p1,a,b,c);
-            const double clearance=pair.distance-target;if(clearance<=0){record_sweep_failure(failure,e,ei,ti,p0,p1,pair,a,b,c,target,speed);atomic_min_double(limit,fmax(0.0,alpha-parking_clearance/speed));return;}const double advance=0.8*clearance/speed;if(alpha+advance>=1){end=true;break;}if(advance<1e-12){record_sweep_failure(failure,e,ei,ti,p0,p1,pair,a,b,c,target,speed);atomic_min_double(limit,fmax(0.0,alpha-parking_clearance/speed));return;}alpha+=advance;}
-        if(!end){record_sweep_failure(failure,e,ei,ti,p0,p1,pair,a,b,c,target,speed);atomic_min_double(limit,fmax(0.0,alpha-parking_clearance/speed));}});
+            // Preserve a fraction of the clearance that actually exists at the
+            // beginning of this proposal. A fixed parking distance can exceed
+            // an already-active contact gap and incorrectly collapse TOI to zero.
+            const double clearance=pair.distance-target;if(k==0)initial_clearance=fmax(0.0,clearance);const double safe_clearance=fmin(maximum_parking_clearance,0.1*initial_clearance);
+            if(clearance<=0){record_sweep_failure(failure,e,ei,ti,p0,p1,pair,a,b,c,target,speed);atomic_min_double(limit,fmax(0.0,alpha-safe_clearance/speed));return;}const double advance=0.8*clearance/speed;if(alpha+advance>=1){end=true;break;}if(advance<1e-12){record_sweep_failure(failure,e,ei,ti,p0,p1,pair,a,b,c,target,speed);atomic_min_double(limit,fmax(0.0,alpha-safe_clearance/speed));return;}alpha+=advance;}
+        if(!end){const double safe_clearance=fmin(maximum_parking_clearance,0.1*initial_clearance);record_sweep_failure(failure,e,ei,ti,p0,p1,pair,a,b,c,target,speed);atomic_min_double(limit,fmax(0.0,alpha-safe_clearance/speed));}});
 }
 
 __global__ void ccd_limit_kernel(const double*q,const double*direction,const DNode*nodes,const DElement*elements,
