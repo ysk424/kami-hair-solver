@@ -255,6 +255,7 @@ void test_moving_collider_tunnelling_rejected()
     KhsSolverDesc desc;
     khsDefaultSolverDesc(&desc);
     desc.substeps = 1;
+    desc.maximum_substeps = 4;
     desc.fixed_root_nodes = 1;
     desc.maximum_element_length = 1.0;
     KhsSolver *solver = khsCreate(&desc);
@@ -271,6 +272,18 @@ void test_moving_collider_tunnelling_rejected()
     require(solver, khsBuild(solver));
     require(solver, khsUpdateColliderVertices(solver, above, 3));
     assert(khsStep(solver, 1.0 / 24.0) == KHS_ERROR_NOT_CONVERGED);
+    KhsFailureDiagnostics diagnostics{};
+    diagnostics.struct_size = sizeof(diagnostics);
+    require(solver, khsGetFailureDiagnostics(solver, &diagnostics));
+    assert(diagnostics.kind == KHS_FAILURE_MOVING_COLLIDER_SWEEP);
+    assert(diagnostics.requested_substeps == 1);
+    assert(diagnostics.attempted_substeps == 4);
+    assert(diagnostics.maximum_substeps == 4);
+    assert(diagnostics.adaptive_attempt_count == 3);
+    assert(diagnostics.strand_index == 0);
+    assert(diagnostics.collider_triangle_index == 0);
+    assert(diagnostics.distance <= diagnostics.required_distance + 1.0e-12);
+    assert(std::abs(diagnostics.collider_frame_displacement - 0.2) < 1.0e-12);
     khsDestroy(solver);
 }
 
@@ -298,7 +311,24 @@ void test_gpu_resident_animation()
     require(solver, khsSetColliderAnimationFrame(solver, 0, nullptr, 0));
     require(solver, khsSetColliderAnimationFrame(solver, 1, nullptr, 0));
     require(solver, khsFinalizeAnimation(solver));
+    const uint64_t checkpoint_size = khsGetAnimationCheckpointSize(solver);
+    assert(checkpoint_size > 0);
+    std::vector<unsigned char> checkpoint(checkpoint_size);
+    require(solver, khsSaveAnimationCheckpoint(
+        solver, checkpoint.data(), checkpoint.size()));
     require(solver, khsStepAnimationFrame(solver, 1, 1.0 / 24.0));
+    std::vector<KhsVec3> first_result(3);
+    require(solver, khsCopyOriginalPositions(solver, first_result.data(), 3));
+    require(solver, khsRestoreAnimationCheckpoint(
+        solver, checkpoint.data(), checkpoint.size()));
+    require(solver, khsStepAnimationFrame(solver, 1, 1.0 / 24.0));
+    std::vector<KhsVec3> repeated_result(3);
+    require(solver, khsCopyOriginalPositions(solver, repeated_result.data(), 3));
+    for (size_t i = 0; i < first_result.size(); ++i) {
+        assert(std::abs(first_result[i].x - repeated_result[i].x) < 1.0e-14);
+        assert(std::abs(first_result[i].y - repeated_result[i].y) < 1.0e-14);
+        assert(std::abs(first_result[i].z - repeated_result[i].z) < 1.0e-14);
+    }
     KhsGpuStats gpu{};
     gpu.struct_size = sizeof(gpu);
     require(solver, khsGetGpuStats(solver, &gpu));

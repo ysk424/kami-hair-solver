@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
-ABI_VERSION = 4
+ABI_VERSION = 5
 OK = 0
 
 
@@ -23,6 +23,7 @@ class SolverDesc(ctypes.Structure):
         ("struct_size", ctypes.c_uint32),
         ("gravity", Vec3),
         ("substeps", ctypes.c_uint32),
+        ("maximum_substeps", ctypes.c_uint32),
         ("newton_iterations", ctypes.c_uint32),
         ("line_search_iterations", ctypes.c_uint32),
         ("absolute_tolerance", ctypes.c_double),
@@ -145,6 +146,31 @@ class Progress(ctypes.Structure):
     ]
 
 
+class FailureDiagnostics(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("kind", ctypes.c_uint32),
+        ("frame_index", ctypes.c_uint32),
+        ("substep", ctypes.c_uint32),
+        ("requested_substeps", ctypes.c_uint32),
+        ("attempted_substeps", ctypes.c_uint32),
+        ("maximum_substeps", ctypes.c_uint32),
+        ("adaptive_attempt_count", ctypes.c_uint32),
+        ("strand_index", ctypes.c_uint32),
+        ("element_index", ctypes.c_uint32),
+        ("collider_triangle_index", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("distance", ctypes.c_double),
+        ("required_distance", ctypes.c_double),
+        ("clearance", ctypes.c_double),
+        ("collider_substep_displacement", ctypes.c_double),
+        ("collider_frame_displacement", ctypes.c_double),
+        ("hair_start", Vec3),
+        ("hair_end", Vec3),
+        ("collider_point", Vec3),
+    ]
+
+
 def _vec_array(values):
     storage = np.ascontiguousarray(values, dtype=np.float64).reshape((-1, 3))
     pointer = storage.ctypes.data_as(ctypes.POINTER(Vec3))
@@ -214,6 +240,12 @@ class HairSolver:
         lib.khsFinalizeAnimation.restype = ctypes.c_int
         lib.khsStepAnimationFrame.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double]
         lib.khsStepAnimationFrame.restype = ctypes.c_int
+        lib.khsGetAnimationCheckpointSize.argtypes = [ctypes.c_void_p]
+        lib.khsGetAnimationCheckpointSize.restype = ctypes.c_uint64
+        lib.khsSaveAnimationCheckpoint.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
+        lib.khsSaveAnimationCheckpoint.restype = ctypes.c_int
+        lib.khsRestoreAnimationCheckpoint.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
+        lib.khsRestoreAnimationCheckpoint.restype = ctypes.c_int
         lib.khsGetOriginalPointCount.argtypes = [ctypes.c_void_p]
         lib.khsGetOriginalPointCount.restype = ctypes.c_uint32
         lib.khsCopyOriginalPositions.argtypes = [ctypes.c_void_p, ctypes.POINTER(Vec3), ctypes.c_uint32]
@@ -226,6 +258,8 @@ class HairSolver:
         lib.khsGetGpuStats.restype = ctypes.c_int
         lib.khsGetProgress.argtypes = [ctypes.c_void_p, ctypes.POINTER(Progress)]
         lib.khsGetProgress.restype = ctypes.c_int
+        lib.khsGetFailureDiagnostics.argtypes = [ctypes.c_void_p, ctypes.POINTER(FailureDiagnostics)]
+        lib.khsGetFailureDiagnostics.restype = ctypes.c_int
         lib.khsRequestCancel.argtypes = [ctypes.c_void_p]
         lib.khsRequestCancel.restype = ctypes.c_int
         lib.khsGetLastError.argtypes = [ctypes.c_void_p]
@@ -320,6 +354,22 @@ class HairSolver:
         self._check(self._library.khsStepAnimationFrame(self._handle, int(frame), float(dt)))
         return self.positions(), self.stats()
 
+    def save_checkpoint(self):
+        size = self.checkpoint_size()
+        if not size:
+            raise RuntimeError("CUDAアニメーション状態をまだ保存できません。")
+        storage = (ctypes.c_ubyte * size)()
+        self._check(self._library.khsSaveAnimationCheckpoint(self._handle, storage, size))
+        return bytes(storage)
+
+    def restore_checkpoint(self, checkpoint):
+        storage = (ctypes.c_ubyte * len(checkpoint)).from_buffer_copy(checkpoint)
+        self._check(self._library.khsRestoreAnimationCheckpoint(
+            self._handle, storage, len(checkpoint)))
+
+    def checkpoint_size(self):
+        return int(self._library.khsGetAnimationCheckpointSize(self._handle))
+
     def stats(self):
         stats = StepStats()
         stats.struct_size = ctypes.sizeof(stats)
@@ -337,6 +387,13 @@ class HairSolver:
         progress.struct_size = ctypes.sizeof(progress)
         self._check(self._library.khsGetProgress(self._handle, ctypes.byref(progress)))
         return progress
+
+    def failure_diagnostics(self):
+        diagnostics = FailureDiagnostics()
+        diagnostics.struct_size = ctypes.sizeof(diagnostics)
+        self._check(self._library.khsGetFailureDiagnostics(
+            self._handle, ctypes.byref(diagnostics)))
+        return diagnostics
 
     def cancel(self):
         self._check(self._library.khsRequestCancel(self._handle))

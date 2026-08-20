@@ -35,6 +35,33 @@ _PROGRESS_PHASE_NAMES = {
     6: "完了",
     7: "失敗",
 }
+_UINT32_MAX = (1 << 32) - 1
+_FAILURE_KIND_NAMES = {
+    1: "移動コライダー横切り",
+    2: "バリア実行可能領域外",
+    3: "非線形求解失敗",
+}
+_PARAMETER_INFO = {
+    "substeps": ("基本サブステップ", "same_frame"),
+    "maximum_substeps": ("適応サブステップ上限", "same_frame"),
+    "newton_iterations": ("Newton反復上限", "same_frame"),
+    "density": ("密度", "rewind"),
+    "radius": ("物理半径", "rewind"),
+    "young_modulus": ("Young率", "rewind"),
+    "poisson_ratio": ("Poisson比", "rewind"),
+    "mass_damping": ("質量比例減衰", "rewind"),
+    "contact_stiffness": ("接触バリア剛性", "rewind"),
+    "barrier_distance": ("バリア活性距離", "rewind"),
+    "friction": ("摩擦係数", "rewind"),
+    "collider_offset": ("コライダー間隔", "rewind"),
+    "maximum_element_length": ("最大要素長", "restart"),
+    "minimum_dynamic_length": ("最小動力学長", "restart"),
+    "fixed_root_nodes": ("固定する毛根節点数", "restart"),
+}
+_DISTANCE_PARAMETERS = {
+    "radius", "barrier_distance", "collider_offset",
+    "maximum_element_length", "minimum_dynamic_length",
+}
 
 
 def _hair_poll(_self, obj):
@@ -45,14 +72,37 @@ def _mesh_poll(_self, obj):
     return obj is not None and obj.type == "MESH"
 
 
+def _get_maximum_substeps(settings):
+    stored = settings.get("_maximum_substeps")
+    if stored is None:
+        stored = settings.get("maximum_substeps")
+    if stored is not None:
+        return int(stored)
+    return min(4096, max(1, int(settings.substeps) * 4))
+
+
+def _set_maximum_substeps(settings, value):
+    settings["_maximum_substeps"] = int(value)
+
+
 class HairSettings(PropertyGroup):
     hair: PointerProperty(name="入力する髪", type=bpy.types.Object, poll=_hair_poll)
     collider: PointerProperty(name="衝突メッシュ", type=bpy.types.Object, poll=_mesh_poll)
     result: PointerProperty(name="計算結果の髪", type=bpy.types.Object)
     frame_start: IntProperty(name="開始フレーム", default=1, min=-1048574, max=1048574)
     frame_end: IntProperty(name="終了フレーム", default=30, min=-1048574, max=1048574)
-    substeps: IntProperty(name="サブステップ", default=8, min=1, max=256)
+    substeps: IntProperty(name="基本サブステップ", default=8, min=1, max=4096)
+    maximum_substeps: IntProperty(
+        name="適応サブステップ上限",
+        description="移動コライダー横切りや求解失敗時に自動増加できる上限",
+        min=1, max=4096, get=_get_maximum_substeps, set=_set_maximum_substeps)
     newton_iterations: IntProperty(name="Newton反復上限", default=24, min=2, max=100)
+    checkpoint_frames: IntProperty(
+        name="巻き戻し保持フレーム数",
+        description="デバッグ再開用に完全なCUDA状態をメモリへ保持する過去フレーム数",
+        default=10, min=1, max=100)
+    resume_frame: IntProperty(
+        name="再開フレーム", default=1, min=-1048574, max=1048574)
     maximum_element_length: FloatProperty(
         name="最大要素長", default=0.01, min=1.0e-5, soft_max=0.05, subtype="DISTANCE", unit="LENGTH")
     minimum_dynamic_length: FloatProperty(
@@ -79,6 +129,7 @@ class HairSettings(PropertyGroup):
     status: StringProperty(name="状態", default="未準備")
     summary: StringProperty(name="準備情報", default="")
     error_detail: StringProperty(name="エラー詳細", default="")
+    parameter_history: StringProperty(name="パラメータ変更履歴", default="")
 
 
 def _notify_codex():
@@ -103,16 +154,94 @@ def _append_notification_error(settings, notification_error):
     settings.error_detail += notification_error
 
 
+def _settings_snapshot(settings):
+    return {name: getattr(settings, name) for name in _PARAMETER_INFO}
+
+
+def _parameter_changes(previous, current):
+    changes = []
+    for name, (label, category) in _PARAMETER_INFO.items():
+        before = previous.get(name)
+        after = current.get(name)
+        if before != after:
+            changes.append((name, label, category, before, after))
+    return changes
+
+
+def _parameter_value_text(name, value):
+    if name in _DISTANCE_PARAMETERS:
+        return f"{float(value) * 1000.0:.6g} mm"
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+def _parameter_history_line(resume_frame, changes):
+    detail = "、".join(
+        f"{label} {_parameter_value_text(name, before)}→{_parameter_value_text(name, after)}"
+        for name, label, _category, before, after in changes)
+    return f"フレーム{resume_frame}から再開: {detail}"
+
+
+def _adaptive_sequence(initial, attempted, maximum):
+    if initial < 1 or attempted < 1:
+        return []
+    sequence = [initial]
+    while sequence[-1] < attempted:
+        next_value = min(maximum, sequence[-1] * 2)
+        if next_value <= sequence[-1]:
+            break
+        sequence.append(next_value)
+    if sequence[-1] != attempted:
+        sequence.append(attempted)
+    return sequence
+
+
+def _vec_text(value):
+    return f"({value[0]:.5f}, {value[1]:.5f}, {value[2]:.5f}) m"
+
+
 def _progress_snapshot(solver):
     try:
         progress = solver.progress()
-        return {
+        snapshot = {
             "phase": int(progress.phase),
             "substep": int(progress.substep),
             "substep_count": int(progress.substep_count),
             "iteration": int(progress.nonlinear_iteration),
             "iteration_limit": int(progress.nonlinear_iteration_limit),
         }
+        diagnostics = solver.failure_diagnostics()
+        if diagnostics.kind:
+            snapshot["failure"] = {
+                "kind": int(diagnostics.kind),
+                "frame_index": int(diagnostics.frame_index),
+                "substep": int(diagnostics.substep),
+                "requested_substeps": int(diagnostics.requested_substeps),
+                "attempted_substeps": int(diagnostics.attempted_substeps),
+                "maximum_substeps": int(diagnostics.maximum_substeps),
+                "adaptive_attempt_count": int(diagnostics.adaptive_attempt_count),
+                "strand_index": int(diagnostics.strand_index),
+                "element_index": int(diagnostics.element_index),
+                "triangle_index": int(diagnostics.collider_triangle_index),
+                "distance": float(diagnostics.distance),
+                "required_distance": float(diagnostics.required_distance),
+                "clearance": float(diagnostics.clearance),
+                "collider_substep_displacement": float(
+                    diagnostics.collider_substep_displacement),
+                "collider_frame_displacement": float(
+                    diagnostics.collider_frame_displacement),
+                "hair_start": (
+                    float(diagnostics.hair_start.x), float(diagnostics.hair_start.y),
+                    float(diagnostics.hair_start.z)),
+                "hair_end": (
+                    float(diagnostics.hair_end.x), float(diagnostics.hair_end.y),
+                    float(diagnostics.hair_end.z)),
+                "collider_point": (
+                    float(diagnostics.collider_point.x), float(diagnostics.collider_point.y),
+                    float(diagnostics.collider_point.z)),
+            }
+        return snapshot
     except Exception:
         return None
 
@@ -128,8 +257,36 @@ def _failure_detail(stage, exception, *, completed_frame=None, failed_frame=None
         parts.append(phase)
         if progress["substep_count"]:
             parts.append(f"サブステップ {progress['substep']}/{progress['substep_count']}")
-        if progress["iteration_limit"]:
+        if progress["iteration"]:
             parts.append(f"Newton反復 {progress['iteration']}/{progress['iteration_limit']}")
+        failure = progress.get("failure")
+        if failure:
+            kind = _FAILURE_KIND_NAMES.get(failure["kind"], f"失敗種別{failure['kind']}")
+            parts.append(kind)
+            sequence = _adaptive_sequence(
+                failure["requested_substeps"], failure["attempted_substeps"],
+                failure["maximum_substeps"])
+            if sequence:
+                parts.append(
+                    "適応サブステップ " + "→".join(str(value) for value in sequence) +
+                    f"（上限{failure['maximum_substeps']}）")
+            if failure["strand_index"] != _UINT32_MAX:
+                parts.append(
+                    f"髪ストランド{failure['strand_index'] + 1} / "
+                    f"内部要素{failure['element_index']} / "
+                    f"コライダー三角形{failure['triangle_index']}")
+                parts.append(
+                    f"検出距離 {failure['distance'] * 1000.0:.4f} mm / "
+                    f"必要距離 {failure['required_distance'] * 1000.0:.4f} mm / "
+                    f"余裕 {failure['clearance'] * 1000.0:.4f} mm")
+                parts.append(
+                    f"対象面移動 {failure['collider_substep_displacement'] * 1000.0:.4f} mm/サブステップ / "
+                    f"{failure['collider_frame_displacement'] * 1000.0:.3f} mm/フレーム")
+                parts.append(
+                    f"髪区間 {_vec_text(failure['hair_start'])}→{_vec_text(failure['hair_end'])} / "
+                    f"コライダー位置 {_vec_text(failure['collider_point'])}")
+            if failure["kind"] == 1:
+                parts.append("推奨: 適応上限を増やすか、数フレーム戻して接触パラメータを調整してください")
     parts.append(f"{type(exception).__name__}: {exception}")
     return " / ".join(parts)
 
@@ -231,6 +388,7 @@ def _new_result_object(scene, source, sizes, positions, radii):
 
 def _apply_solver_settings(settings, solver):
     solver.desc.substeps = settings.substeps
+    solver.desc.maximum_substeps = settings.maximum_substeps
     solver.desc.newton_iterations = settings.newton_iterations
     solver.desc.maximum_element_length = settings.maximum_element_length
     solver.desc.minimum_dynamic_length = settings.minimum_dynamic_length
@@ -262,6 +420,8 @@ def _begin_prepare_scene(scene):
         raise RuntimeError("衝突メッシュには Mesh オブジェクトを指定してください。")
     if settings.frame_end < settings.frame_start:
         raise RuntimeError("終了フレームは開始フレーム以降にしてください。")
+    if settings.maximum_substeps < settings.substeps:
+        raise RuntimeError("適応サブステップ上限は基本サブステップ以上にしてください。")
     original_frame = scene.frame_current
     scene.frame_set(settings.frame_start)
     depsgraph = bpy.context.evaluated_depsgraph_get()
@@ -355,16 +515,22 @@ def _finish_prepare_scene(scene, state):
         "collider": settings.collider,
         "frame_start": settings.frame_start,
         "frame_end": settings.frame_end,
+        "checkpoint_capacity": settings.checkpoint_frames + 1,
+        "initial_settings_snapshot": _settings_snapshot(settings),
+        "parameter_history": [],
     }
     _SESSIONS[scene_key] = session
     stats = state["stats"]
     memory_mb = stats.estimated_bytes / (1024.0 * 1024.0)
     gpu_mb = gpu_stats.resident_bytes / (1024.0 * 1024.0)
     gpu_name = bytes(gpu_info.device_name).split(b"\0", 1)[0].decode("utf-8", errors="replace")
+    checkpoint_mb = solver.checkpoint_size() / (1024.0 * 1024.0)
     settings.summary = (
         f"{stats.strand_count}本 / 元{stats.original_point_count}点 / "
         f"内部{stats.internal_node_count}節点 / {stats.element_count}要素 / "
-        f"CPU {memory_mb:.1f} MiB / CUDA {gpu_mb:.1f} MiB / {gpu_name}")
+        f"CPU {memory_mb:.1f} MiB / CUDA {gpu_mb:.1f} MiB / "
+        f"巻戻し最大約{checkpoint_mb * session['checkpoint_capacity']:.1f} MiB / {gpu_name}")
+    settings.parameter_history = ""
     diagnostics = []
     if stats.virtual_extension_strand_count:
         diagnostics.append(
@@ -447,7 +613,8 @@ def _duration_text(seconds):
     return f"{seconds}秒"
 
 
-def _new_calculation_state(start, *, resume=None):
+def _new_calculation_state(start, *, resume=None, checkpoint_capacity=11,
+                           settings_snapshot=None, parameter_history=None):
     resume = resume or {}
     return {
         "done": False,
@@ -463,7 +630,75 @@ def _new_calculation_state(start, *, resume=None):
         "final_positions": resume.get("final_positions"),
         "cancelled": False,
         "resume": bool(resume),
+        "checkpoints": dict(resume.get("checkpoints", {})),
+        "checkpoint_capacity": int(resume.get("checkpoint_capacity", checkpoint_capacity)),
+        "settings_snapshot": dict(
+            resume.get("settings_snapshot", settings_snapshot or {})),
+        "parameter_history": list(
+            resume.get("parameter_history", parameter_history or [])),
     }
+
+
+def _remember_checkpoint(state, frame, solver):
+    checkpoints = state["checkpoints"]
+    checkpoints[frame] = solver.save_checkpoint()
+    while len(checkpoints) > state["checkpoint_capacity"]:
+        del checkpoints[next(iter(checkpoints))]
+
+
+def _resume_frame_range(record):
+    checkpoints = record.get("checkpoints", {})
+    failed = record.get("failed_frame")
+    if not checkpoints or failed is None:
+        return None
+    minimum = min(checkpoints) + 1
+    maximum = min(failed, max(checkpoints) + 1)
+    return minimum, maximum
+
+
+def _record_for_resume_frame(record, resume_frame):
+    valid_range = _resume_frame_range(record)
+    if valid_range is None or not valid_range[0] <= resume_frame <= valid_range[1]:
+        if valid_range:
+            raise RuntimeError(
+                f"再開フレームは{valid_range[0]}〜{valid_range[1]}を指定してください。")
+        raise RuntimeError("巻き戻し用CUDAチェックポイントがありません。")
+    checkpoint_frame = resume_frame - 1
+    checkpoint = record["checkpoints"].get(checkpoint_frame)
+    if checkpoint is None:
+        raise RuntimeError(f"フレーム{checkpoint_frame}終了時のCUDA状態がありません。")
+    record["session"]["solver"].restore_checkpoint(checkpoint)
+    resumed = dict(record)
+    resumed["completed_frame"] = checkpoint_frame
+    resumed["solver_frame"] = checkpoint_frame
+    resumed["pending_positions"] = None
+    resumed["failed_frame"] = resume_frame
+    resumed["error_stage"] = None
+    resumed["error_progress"] = None
+    completed_count = max(0, checkpoint_frame - record["start"] + 1)
+    resumed["frame_seconds"] = list(record.get("frame_seconds", []))[:completed_count]
+    resumed["checkpoints"] = {
+        frame: value for frame, value in record["checkpoints"].items()
+        if frame <= checkpoint_frame
+    }
+    temporary = record["path"].with_suffix(record["path"].suffix + ".未完成")
+    resumed["final_positions"] = _read_cache_frame(temporary, checkpoint_frame)
+    resumed["final_stats"] = None
+    return resumed
+
+
+def _resume_parameter_advice(record, settings, resume_frame=None):
+    current = _settings_snapshot(settings)
+    changes = _parameter_changes(record.get("settings_snapshot", {}), current)
+    if any(change[2] == "restart" for change in changes):
+        labels = "、".join(change[1] for change in changes if change[2] == "restart")
+        return f"{labels}の変更は最初から再計算が必要です。", changes
+    selected = settings.resume_frame if resume_frame is None else resume_frame
+    if any(change[2] == "rewind" for change in changes) and selected >= record["failed_frame"]:
+        return "材料・接触パラメータの変更は1フレーム以上戻して再開することを推奨します。", changes
+    if changes:
+        return "変更したパラメータを適用して再開します。", changes
+    return "保存済みのCUDA状態から再開します。", changes
 
 
 def _open_cache_for_calculation(temporary, start, end, point_count, state):
@@ -518,6 +753,8 @@ def _calculate_preloaded(session, start, end, fps, path, state, frame_callback=N
                 state["error_stage"] = f"フレーム{frame}のキャッシュ書込"
                 _write_cache_frame(file, positions)
                 file.flush()
+                state["error_stage"] = f"フレーム{frame}の巻き戻し状態保存"
+                _remember_checkpoint(state, frame, solver)
                 state["final_positions"] = positions
                 state["completed_frame"] = frame
                 state["pending_positions"] = None
@@ -550,6 +787,10 @@ def _resume_record(session, start, end, path, state):
         "failed_frame": state["failed_frame"],
         "error_stage": state["error_stage"],
         "error_progress": state["error_progress"],
+        "checkpoints": dict(state["checkpoints"]),
+        "checkpoint_capacity": state["checkpoint_capacity"],
+        "settings_snapshot": dict(state["settings_snapshot"]),
+        "parameter_history": list(state["parameter_history"]),
     }
 
 
@@ -599,7 +840,10 @@ def bake_scene(scene, progress=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         fps = scene.render.fps / scene.render.fps_base
         began = time.perf_counter()
-        state = _new_calculation_state(start)
+        state = _new_calculation_state(
+            start, checkpoint_capacity=session["checkpoint_capacity"],
+            settings_snapshot=_settings_snapshot(settings),
+            parameter_history=session["parameter_history"])
 
         def frame_finished(frame, positions):
             _set_hair_positions(session["result"], positions)
@@ -612,7 +856,8 @@ def bake_scene(scene, progress=None):
 
         _calculate_preloaded(session, start, end, fps, path, state, frame_finished)
         if state["error"] is not None:
-            _store_resume_record(scene_key, session, start, end, path, state)
+            if _store_resume_record(scene_key, session, start, end, path, state):
+                settings.resume_frame = state["failed_frame"]
             settings.error_detail = _failure_detail(
                 state["error_stage"], state["error"],
                 completed_frame=(state["completed_frame"]
@@ -707,11 +952,28 @@ class KAMI_OT_bake(Operator):
                 raise RuntimeError("再開中は入力する髪と衝突メッシュを変更できません。")
             if settings.frame_start != record["start"] or settings.frame_end != record["end"]:
                 raise RuntimeError("再開中は開始フレームと終了フレームを変更できません。")
+            if settings.maximum_substeps < settings.substeps:
+                raise RuntimeError("適応サブステップ上限は基本サブステップ以上にしてください。")
             path = Path(bpy.path.abspath(settings.cache_path))
             if path != record["path"]:
                 raise RuntimeError("再開中は髪キャッシュの保存先を変更できません。")
+            advice, changes = _resume_parameter_advice(
+                record, settings, settings.resume_frame)
+            restart_changes = [change[1] for change in changes if change[2] == "restart"]
+            if restart_changes:
+                raise RuntimeError(
+                    "、".join(restart_changes) + "は構造を変えるため最初から計算してください。")
+            current_settings = _settings_snapshot(settings)
             _apply_solver_settings(settings, session["solver"])
             session["solver"].update_runtime_parameters()
+            resumed_record = _record_for_resume_frame(record, settings.resume_frame)
+            resumed_record["settings_snapshot"] = current_settings
+            history = list(record.get("parameter_history", []))
+            if changes:
+                history.append(_parameter_history_line(settings.resume_frame, changes))
+            resumed_record["parameter_history"] = history
+            session["parameter_history"] = history
+            settings.parameter_history = "\n".join(history)
             path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as exception:
             settings.error_detail = _failure_detail("再開準備", exception)
@@ -728,7 +990,9 @@ class KAMI_OT_bake(Operator):
         self._path = path
         self._start = record["start"]
         self._end = record["end"]
-        self._state = _new_calculation_state(self._start, resume=record)
+        self._state = _new_calculation_state(self._start, resume=resumed_record)
+        if self._state["final_positions"] is not None:
+            _set_hair_positions(session["result"], self._state["final_positions"])
         self._began = time.perf_counter()
         fps = scene.render.fps / scene.render.fps_base
         self._thread = threading.Thread(
@@ -737,7 +1001,8 @@ class KAMI_OT_bake(Operator):
             name="髪CUDA再開計算", daemon=True)
         self._thread.start()
         settings.error_detail = ""
-        settings.status = f"CUDA計算をフレーム{self._state['completed_frame'] + 1}から再開"
+        settings.status = (
+            f"CUDA計算をフレーム{self._state['completed_frame'] + 1}から再開 / {advice}")
         return self._start_modal(context)
 
     def execute(self, context):
@@ -787,7 +1052,10 @@ class KAMI_OT_bake(Operator):
         self._path = path
         self._start = settings.frame_start
         self._end = settings.frame_end
-        self._state = _new_calculation_state(self._start)
+        self._state = _new_calculation_state(
+            self._start, checkpoint_capacity=session["checkpoint_capacity"],
+            settings_snapshot=_settings_snapshot(settings),
+            parameter_history=session["parameter_history"])
         self._thread = threading.Thread(
             target=_calculate_preloaded,
             args=(session, self._start, self._end, fps, path, self._state),
@@ -867,9 +1135,10 @@ class KAMI_OT_bake(Operator):
         self._stop_modal(context)
         self._scene.frame_set(self._original_frame)
         if self._state["error"] is not None:
-            _store_resume_record(
-                self._scene_key, self._session, self._start, self._end,
-                self._path, self._state)
+            if _store_resume_record(
+                    self._scene_key, self._session, self._start, self._end,
+                    self._path, self._state):
+                settings.resume_frame = self._state["failed_frame"]
             settings.error_detail = _failure_detail(
                 self._state["error_stage"], self._state["error"],
                 completed_frame=(self._state["completed_frame"]
@@ -911,6 +1180,45 @@ class KAMI_OT_bake(Operator):
             return {"CANCELLED"}
 
 
+class KAMI_OT_set_resume_frame(Operator):
+    bl_idname = "kami_hair.set_resume_frame"
+    bl_label = "再開フレームを設定"
+    bl_options = {"INTERNAL"}
+    target_frame: IntProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        record = _RESUMABLE_BAKES.get(context.scene.as_pointer())
+        valid_range = _resume_frame_range(record) if record else None
+        if valid_range is None:
+            self.report({"ERROR"}, "再開できるCUDAチェックポイントがありません。")
+            return {"CANCELLED"}
+        context.scene.kami_hair.resume_frame = min(
+            valid_range[1], max(valid_range[0], self.target_frame))
+        return {"FINISHED"}
+
+
+class KAMI_OT_restore_parameters(Operator):
+    bl_idname = "kami_hair.restore_parameters"
+    bl_label = "開始時設定に戻す"
+    bl_description = "この計算を開始した時点の物理パラメータへ戻します"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        scene = context.scene
+        if scene.as_pointer() in _ACTIVE_BAKES:
+            self.report({"ERROR"}, "CUDA計算中は設定を戻せません。")
+            return {"CANCELLED"}
+        session = _SESSIONS.get(scene.as_pointer())
+        if session is None:
+            self.report({"ERROR"}, "開始時設定がありません。")
+            return {"CANCELLED"}
+        settings = scene.kami_hair
+        for name, value in session["initial_settings_snapshot"].items():
+            setattr(settings, name, value)
+        settings.status = "計算開始時の物理パラメータへ戻しました"
+        return {"FINISHED"}
+
+
 class KAMI_OT_clear(Operator):
     bl_idname = "kami_hair.clear"
     bl_label = "髪の計算結果を消去"
@@ -947,6 +1255,7 @@ class KAMI_OT_clear(Operator):
         settings.result = None
         settings.summary = ""
         settings.error_detail = ""
+        settings.parameter_history = ""
         settings.status = "未準備"
         return {"FINISHED"}
 
@@ -970,7 +1279,9 @@ class KAMI_PT_panel(Panel):
         layout.prop(settings, "minimum_dynamic_length")
         layout.prop(settings, "fixed_root_nodes")
         layout.prop(settings, "substeps")
+        layout.prop(settings, "maximum_substeps")
         layout.prop(settings, "newton_iterations")
+        layout.prop(settings, "checkpoint_frames")
         layout.prop(settings, "cache_path")
         layout.prop(settings, "show_advanced", toggle=True)
         if settings.show_advanced:
@@ -989,12 +1300,38 @@ class KAMI_PT_panel(Panel):
         row = layout.row(align=True)
         row.operator("kami_hair.prepare", icon="MOD_PARTICLES")
         row.operator("kami_hair.bake", icon="PHYSICS")
-        resume_row = layout.row()
-        resume_row.enabled = (
-            context.scene.as_pointer() in _RESUMABLE_BAKES and
-            context.scene.as_pointer() not in _ACTIVE_BAKES)
-        resume_operator = resume_row.operator("kami_hair.bake", text="失敗フレームから再開", icon="PLAY")
-        resume_operator.resume = True
+        scene_key = context.scene.as_pointer()
+        record = _RESUMABLE_BAKES.get(scene_key)
+        if record:
+            resume_box = layout.box()
+            resume_box.label(text="デバッグ再開", icon="RECOVER_LAST")
+            valid_range = _resume_frame_range(record)
+            if valid_range:
+                resume_box.label(text=f"再開可能: {valid_range[0]}〜{valid_range[1]}")
+                resume_box.prop(settings, "resume_frame")
+                shortcut_row = resume_box.row(align=True)
+                failed = record["failed_frame"]
+                for label, offset in (("失敗位置", 0), ("-1", -1), ("-5", -5), ("-10", -10)):
+                    operator = shortcut_row.operator(
+                        "kami_hair.set_resume_frame", text=label)
+                    operator.target_frame = failed + offset
+                if not valid_range[0] <= settings.resume_frame <= valid_range[1]:
+                    resume_box.label(text="再開フレームが保存範囲外です", icon="ERROR")
+                advice, _changes = _resume_parameter_advice(record, settings)
+                for line in textwrap.wrap(advice, width=38):
+                    resume_box.label(text=line, icon="INFO")
+                resume_row = resume_box.row()
+                resume_row.enabled = (
+                    scene_key not in _ACTIVE_BAKES and
+                    valid_range[0] <= settings.resume_frame <= valid_range[1])
+                resume_operator = resume_row.operator(
+                    "kami_hair.bake", text="指定フレームから再開", icon="PLAY")
+                resume_operator.resume = True
+                restore_row = resume_box.row()
+                restore_row.enabled = scene_key not in _ACTIVE_BAKES
+                restore_row.operator("kami_hair.restore_parameters", icon="FILE_REFRESH")
+            else:
+                resume_box.label(text="再開用CUDA状態がありません", icon="ERROR")
         layout.operator("kami_hair.clear", icon="TRASH")
         layout.separator()
         layout.label(text=f"状態: {settings.status}")
@@ -1005,9 +1342,17 @@ class KAMI_PT_panel(Panel):
                 box.label(text=line)
         if settings.summary:
             layout.label(text=settings.summary)
+        if settings.parameter_history:
+            box = layout.box()
+            box.label(text="パラメータ変更履歴", icon="TIME")
+            for entry in settings.parameter_history.splitlines():
+                for line in textwrap.wrap(entry, width=42):
+                    box.label(text=line)
 
 
-_CLASSES = (HairSettings, KAMI_OT_prepare, KAMI_OT_bake, KAMI_OT_clear, KAMI_PT_panel)
+_CLASSES = (
+    HairSettings, KAMI_OT_prepare, KAMI_OT_bake, KAMI_OT_set_resume_frame,
+    KAMI_OT_restore_parameters, KAMI_OT_clear, KAMI_PT_panel)
 
 
 def register():

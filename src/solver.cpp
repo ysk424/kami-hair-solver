@@ -850,6 +850,26 @@ KhsResult Solver::step_animation_frame(uint32_t frame, double frame_dt)
     return result;
 }
 
+uint64_t Solver::animation_checkpoint_size() const
+{
+    return built_ && cuda_ ? cuda_->animation_checkpoint_size() : 0;
+}
+
+KhsResult Solver::save_animation_checkpoint(void *data, uint64_t capacity)
+{
+    if (!built_ || !cuda_) return KHS_ERROR_INVALID_STATE;
+    return cuda_->save_animation_checkpoint(data, capacity);
+}
+
+KhsResult Solver::restore_animation_checkpoint(const void *data, uint64_t size)
+{
+    if (!built_ || !cuda_) return KHS_ERROR_INVALID_STATE;
+    const KhsResult result = cuda_->restore_animation_checkpoint(data, size);
+    if (result != KHS_OK) error_ = cuda_->last_error();
+    else error_.clear();
+    return result;
+}
+
 KhsResult Solver::gpu_stats(KhsGpuStats *stats) const
 {
     if (!cuda_ || !stats || stats->struct_size < sizeof(KhsGpuStats)) return KHS_ERROR_INVALID_ARGUMENT;
@@ -861,6 +881,14 @@ KhsResult Solver::progress(KhsProgress *value) const
 {
     if (!cuda_ || !value || value->struct_size < sizeof(KhsProgress)) return KHS_ERROR_INVALID_ARGUMENT;
     *value = cuda_->progress();
+    return KHS_OK;
+}
+
+KhsResult Solver::failure_diagnostics(KhsFailureDiagnostics *diagnostics) const
+{
+    if (!cuda_ || !diagnostics || diagnostics->struct_size < sizeof(KhsFailureDiagnostics))
+        return KHS_ERROR_INVALID_ARGUMENT;
+    *diagnostics = cuda_->failure_diagnostics();
     return KHS_OK;
 }
 

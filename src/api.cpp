@@ -37,6 +37,7 @@ KhsResult guarded(KhsSolver *solver, Function &&function)
 bool valid_desc(const KhsSolverDesc *desc)
 {
     return desc && desc->struct_size >= sizeof(KhsSolverDesc) && desc->substeps > 0 &&
+        desc->maximum_substeps >= desc->substeps &&
         desc->newton_iterations > 0 && desc->line_search_iterations > 0 &&
         desc->absolute_tolerance > 0.0 && desc->relative_tolerance > 0.0 &&
         desc->increment_tolerance > 0.0 && desc->minimum_line_search_step > 0.0 &&
@@ -82,6 +83,7 @@ void khsDefaultSolverDesc(KhsSolverDesc *desc)
     desc->struct_size = sizeof(*desc);
     desc->gravity = {0.0, 0.0, -9.81};
     desc->substeps = 8;
+    desc->maximum_substeps = 32;
     desc->newton_iterations = 24;
     desc->line_search_iterations = 20;
     desc->absolute_tolerance = 1.0e-8;
@@ -209,6 +211,25 @@ KhsResult khsStepAnimationFrame(KhsSolver *solver, uint32_t frame_index, double 
     });
 }
 
+uint64_t khsGetAnimationCheckpointSize(const KhsSolver *solver)
+{
+    return solver ? solver->implementation.animation_checkpoint_size() : 0;
+}
+
+KhsResult khsSaveAnimationCheckpoint(KhsSolver *solver, void *data, uint64_t capacity)
+{
+    return guarded(solver, [&] {
+        return solver->implementation.save_animation_checkpoint(data, capacity);
+    });
+}
+
+KhsResult khsRestoreAnimationCheckpoint(KhsSolver *solver, const void *data, uint64_t size)
+{
+    return guarded(solver, [&] {
+        return solver->implementation.restore_animation_checkpoint(data, size);
+    });
+}
+
 uint32_t khsGetOriginalPointCount(const KhsSolver *solver)
 {
     return solver ? solver->implementation.original_point_count() : 0;
@@ -262,6 +283,13 @@ KhsResult khsGetProgress(const KhsSolver *solver, KhsProgress *progress)
 {
     if (!solver) return KHS_ERROR_INVALID_ARGUMENT;
     return solver->implementation.progress(progress);
+}
+
+KhsResult khsGetFailureDiagnostics(const KhsSolver *solver,
+                                    KhsFailureDiagnostics *diagnostics)
+{
+    if (!solver) return KHS_ERROR_INVALID_ARGUMENT;
+    return solver->implementation.failure_diagnostics(diagnostics);
 }
 
 KhsResult khsRequestCancel(KhsSolver *solver)

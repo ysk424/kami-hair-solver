@@ -2,7 +2,7 @@
 
 Blender 5.2 の Hair Curves を、回転自由度付きの幾何学的非線形 Cosserat ロッド有限要素として計算する Windows x64 DLL と Blender Extension です。
 
-Version 0.4.0 の実装済み挙動は、英語版の [Current Specification](CURRENT_SPECIFICATION.md) に記録しています。これは初期要求ではなく、現行コードのas-built仕様です。
+Version 0.5.1 の実装済み挙動は、英語版の [Current Specification](CURRENT_SPECIFICATION.md) に記録しています。これは初期要求ではなく、現行コードのas-built仕様です。
 
 この実装は PBD／XPBD／位置拘束投影を使用しません。慣性、ロッド弾性、バリア接触をCUDA上の増分ポテンシャルとして評価し、ストランド並列Gauss-Newton、BVH、CCD line searchで実行可能解を求めます。摩擦は非線形系を不安定化させないGPU Coulombインパルスとして各サブステップ後に適用します。CPUソルバーへのフォールバックはありません。
 
@@ -28,7 +28,7 @@ cmake --build build-cuda --target blender-extension-test
 cmake --build build-cuda --target blender-extension
 ```
 
-CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.4.0-windows-x64.zip` です。
+CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.5.1-windows-x64.zip` です。
 
 ## Blender での使用
 
@@ -38,7 +38,7 @@ Extension を有効にすると、3D View のサイドバーに「髪」タブ�
 2. 必要なら評価後に三角形化できる「衝突メッシュ」を指定します。
 3. 「髪を準備」でゼロ長区間、縮退面、初期交差、最小ギャップを検査できます。
 4. 「髪を計算」で全フレームをGPUへ転送してからベイクします。転送・フレーム・サブステップ・反復・残り時間をパネルに表示し、Escで中止できます。
-5. 計算に失敗した場合は詳細表示を確認して設定を調整し、「失敗フレームから再開」で完了済みフレームの続きから再計算できます。
+5. 計算に失敗した場合は詳細表示を確認し、保持範囲内の「再開フレーム」を指定して数フレーム前から再計算できます。`失敗位置 / -1 / -5 / -10` のショートカット、パラメータ変更履歴、変更種別に応じた巻き戻し警告も表示します。
 
 正常完了またはエラー終了時には `127.0.0.1:8765/UDP` へ `PING` を送り、`PONG` 応答を確認します。通知用アプリが応答しない場合は、シミュレーション結果を変えずに通知エラーをパネルへ表示します。
 
@@ -51,7 +51,8 @@ Extension を有効にすると、3D View のサイドバーに「髪」タブ�
 - RTX 5070 Ti／`sm_120`向けCUDA倍精度実装です。XPBDフォールバックはありません。
 - 開始から終了までの毛根目標とコライダー頂点アニメーションを計算前にGPUへ常駐させます。
 - コライダーの頂点アニメーションを線形サブステップ補間し、摩擦の相対速度へ含めます。ポリゴントポロジー変化はエラーです。
-- 動くBodyが髪を横切る場合は、フレームをロールバックしてサブステップ数を最大4倍まで自動的に増やします。
+- 動くBodyが髪を横切る場合は、フレームをロールバックし、「基本サブステップ」から明示的な「適応サブステップ上限」まで2倍ずつ自動的に増やします。
+- 完成フレーム境界の変位・回転・速度を直近の指定数だけメモリへ保持し、失敗後に物理状態を保ったまま指定フレームへ巻き戻せます。
 - 固定毛根要素は Dirichlet 境界として扱い、頭皮へ埋め込まれる固定部分を接触候補から除外します。
 - 接触可能な初期状態を要求します。初期交差を押し戻して続行しません。
 

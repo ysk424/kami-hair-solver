@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define KHS_ABI_VERSION 4u
+#define KHS_ABI_VERSION 5u
 
 typedef struct KhsSolver KhsSolver;
 
@@ -62,6 +62,7 @@ typedef struct KhsSolverDesc {
     uint32_t struct_size;
     KhsVec3 gravity;
     uint32_t substeps;
+    uint32_t maximum_substeps;
     uint32_t newton_iterations;
     uint32_t line_search_iterations;
     double absolute_tolerance;
@@ -172,6 +173,36 @@ typedef struct KhsProgress {
     double frame_elapsed_seconds;
 } KhsProgress;
 
+typedef enum KhsFailureKind {
+    KHS_FAILURE_NONE = 0,
+    KHS_FAILURE_MOVING_COLLIDER_SWEEP = 1,
+    KHS_FAILURE_BARRIER_INFEASIBLE = 2,
+    KHS_FAILURE_NONLINEAR_SOLVE = 3
+} KhsFailureKind;
+
+typedef struct KhsFailureDiagnostics {
+    uint32_t struct_size;
+    uint32_t kind;
+    uint32_t frame_index;
+    uint32_t substep;
+    uint32_t requested_substeps;
+    uint32_t attempted_substeps;
+    uint32_t maximum_substeps;
+    uint32_t adaptive_attempt_count;
+    uint32_t strand_index;
+    uint32_t element_index;
+    uint32_t collider_triangle_index;
+    uint32_t reserved;
+    double distance;
+    double required_distance;
+    double clearance;
+    double collider_substep_displacement;
+    double collider_frame_displacement;
+    KhsVec3 hair_start;
+    KhsVec3 hair_end;
+    KhsVec3 collider_point;
+} KhsFailureDiagnostics;
+
 KHS_API uint32_t khsGetAbiVersion(void);
 KHS_API KhsResult khsGetGpuInfo(KhsGpuInfo *info);
 KHS_API void khsDefaultSolverDesc(KhsSolverDesc *desc);
@@ -232,6 +263,18 @@ KHS_API KhsResult khsStepAnimationFrame(KhsSolver *solver,
                                         uint32_t frame_index,
                                         double frame_dt);
 
+/*
+ * 完成フレーム境界のCUDA状態（変位・回転・速度・アニメーション位置）を
+ * 不透明なメモリへ保存・復元する。同じ構築済みソルバー内だけで使用できる。
+ */
+KHS_API uint64_t khsGetAnimationCheckpointSize(const KhsSolver *solver);
+KHS_API KhsResult khsSaveAnimationCheckpoint(KhsSolver *solver,
+                                              void *data,
+                                              uint64_t capacity);
+KHS_API KhsResult khsRestoreAnimationCheckpoint(KhsSolver *solver,
+                                                 const void *data,
+                                                 uint64_t size);
+
 KHS_API uint32_t khsGetOriginalPointCount(const KhsSolver *solver);
 KHS_API uint32_t khsGetInternalNodeCount(const KhsSolver *solver);
 KHS_API KhsResult khsCopyOriginalPositions(const KhsSolver *solver,
@@ -249,6 +292,8 @@ KHS_API KhsResult khsGetLastStepStats(const KhsSolver *solver,
                                       KhsStepStats *stats);
 KHS_API KhsResult khsGetGpuStats(const KhsSolver *solver, KhsGpuStats *stats);
 KHS_API KhsResult khsGetProgress(const KhsSolver *solver, KhsProgress *progress);
+KHS_API KhsResult khsGetFailureDiagnostics(const KhsSolver *solver,
+                                            KhsFailureDiagnostics *diagnostics);
 KHS_API KhsResult khsRequestCancel(KhsSolver *solver);
 KHS_API const char *khsGetLastError(const KhsSolver *solver);
 

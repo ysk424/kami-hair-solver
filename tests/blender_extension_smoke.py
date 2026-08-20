@@ -24,6 +24,7 @@ def test_incomplete_cache_resume(addon, directory):
     class FakeSolver:
         def __init__(self):
             self.failed_once = False
+            self.current_frame = 0
 
         def positions(self):
             return [(1.0, 0.0, 0.0)]
@@ -32,7 +33,15 @@ def test_incomplete_cache_resume(addon, directory):
             if frame == 2 and not self.failed_once:
                 self.failed_once = True
                 raise RuntimeError("意図した再開試験エラー")
+            assert frame == self.current_frame + 1
+            self.current_frame = frame
             return [(float(frame + 1), 0.0, 0.0)], None
+
+        def save_checkpoint(self):
+            return self.current_frame.to_bytes(4, "little")
+
+        def restore_checkpoint(self, checkpoint):
+            self.current_frame = int.from_bytes(checkpoint, "little")
 
     path = directory / "再開試験.khc"
     temporary = path.with_suffix(path.suffix + ".未完成")
@@ -44,10 +53,14 @@ def test_incomplete_cache_resume(addon, directory):
     addon._calculate_preloaded(session, 1, 3, 24.0, path, state)
     assert state["error"] is not None
     assert state["completed_frame"] == 2
+    assert set(state["checkpoints"]) == {1, 2}
     assert temporary.exists() and not path.exists()
 
     record = addon._resume_record(session, 1, 3, path, state)
-    resumed = addon._new_calculation_state(1, resume=record)
+    rewind_record = addon._record_for_resume_frame(record, 2)
+    assert solver.current_frame == 0
+    assert rewind_record["completed_frame"] == 1
+    resumed = addon._new_calculation_state(1, resume=rewind_record)
     addon._calculate_preloaded(session, 1, 3, 24.0, path, resumed)
     assert resumed["error"] is None
     assert resumed["completed_frame"] == 3
@@ -104,12 +117,20 @@ def main():
     settings.frame_start = 1
     settings.frame_end = 2
     settings.substeps = 8
+    settings.maximum_substeps = 32
     settings.newton_iterations = 24
     settings.maximum_element_length = 0.021
     settings.minimum_dynamic_length = 0.10
     settings.fixed_root_nodes = 2
     settings.young_modulus = 1.0e7
     settings.cache_path = str(stage.parent / "髪_試験キャッシュ.khc")
+    original_settings = addon._settings_snapshot(settings)
+    settings.barrier_distance *= 2.0
+    advice, changes = addon._resume_parameter_advice(
+        {"settings_snapshot": original_settings, "failed_frame": 2}, settings, 2)
+    assert "1フレーム以上" in advice
+    assert [change[0] for change in changes] == ["barrier_distance"]
+    settings.barrier_distance = original_settings["barrier_distance"]
 
     scene.frame_set(1)
     _vertices, frame_1_triangles, frame_1_topology = addon._evaluated_collider(
@@ -129,6 +150,7 @@ def main():
     assert settings.result is not hair
     assert settings.result.name.startswith("髪_計算結果")
     solver = addon._SESSIONS[scene.as_pointer()]["solver"]
+    assert solver.checkpoint_size() > 0
     solver.desc.substeps = 9
     solver.update_runtime_parameters()
     original_element_length = solver.desc.maximum_element_length

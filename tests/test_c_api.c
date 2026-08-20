@@ -12,6 +12,10 @@ int main(void)
     assert(desc.struct_size == sizeof(desc));
     assert(material.struct_size == sizeof(material));
     assert(desc.minimum_dynamic_length == 0.0);
+    assert(desc.maximum_substeps == 32);
+    desc.maximum_substeps = desc.substeps - 1;
+    assert(khsCreate(&desc) == 0);
+    desc.maximum_substeps = 32;
     desc.minimum_dynamic_length = -1.0;
     assert(khsCreate(&desc) == 0);
     desc.minimum_dynamic_length = 0.0;

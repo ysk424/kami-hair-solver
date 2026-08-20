@@ -1,13 +1,13 @@
 # Kami Hair Solver — Current Specification
 
-**Software version:** 0.4.0<br>
-**C ABI version:** 4<br>
+**Software version:** 0.5.1<br>
+**C ABI version:** 5<br>
 **Document status:** Current, as-built specification<br>
 **License:** GPL-3.0-or-later
 
 ## 1. Purpose and authority
 
-This document describes the behavior implemented in Kami Hair Solver version 0.4.0. It is an as-built record of the current research software, not an initial requirements document or a promise of future behavior. Earlier research plans and design specifications are superseded by this document. If this document and the version 0.4.0 source disagree, the source is authoritative and this document must be corrected.
+This document describes the behavior implemented in Kami Hair Solver version 0.5.1. It is an as-built record of the current research software, not an initial requirements document or a promise of future behavior. Earlier research plans and design specifications are superseded by this document. If this document and the version 0.5.1 source disagree, the source is authoritative and this document must be corrected.
 
 Kami Hair Solver computes Blender Hair Curves as geometrically nonlinear Cosserat rods with rotational degrees of freedom, implicit time integration, finite-element elasticity, barrier contact, and post-solve Coulomb friction. The production solver is CUDA-only. It does not use PBD, XPBD, position-constraint projection, or a CPU solver fallback.
 
@@ -22,7 +22,7 @@ Kami Hair Solver computes Blender Hair Curves as geometrically nonlinear Cossera
 - Linear algebra dependency: Eigen 3.3 or newer on the host and cuBLAS on the GPU.
 - Numerical precision: double precision for solver state, geometry, cache coordinates, and CUDA computation.
 
-The release build produces `kami_hair_solver.dll` and the Blender Extension archive `kami_hair_solver-0.4.0-windows-x64.zip`.
+The release build produces `kami_hair_solver.dll` and the Blender Extension archive `kami_hair_solver-0.5.1-windows-x64.zip`.
 
 ## 3. Components
 
@@ -115,7 +115,7 @@ The nonlinear solve fails when it starts outside the barrier-feasible region or 
 
 Every animation frame starts with the configured base substep count. The frame's positions and velocities are snapshotted before solving. If a solve attempt fails or a moving collider crosses contact-enabled hair, the entire frame is restored and retried with twice as many substeps.
 
-With a collider, the retry ceiling is four times the configured base count when the base is at most 64, capped globally at 256. Without a collider, no adaptive increase is used. Failure at the ceiling returns an error and leaves the frame rolled back.
+With a collider, the retry ceiling is the separately configured adaptive-substep maximum. Attempts double from the base count and clamp to that maximum. The Blender default is 8 base substeps and a maximum of 32; both fields accept explicit values up to 4096. Without a collider, no adaptive increase is used. Failure at the ceiling returns an error and leaves the frame rolled back.
 
 ## 8. Collider and contact model
 
@@ -163,7 +163,7 @@ There is no CPU simulation path.
 
 ## 10. Blender Extension behavior
 
-The Extension is a Japanese-language panel in the 3D View sidebar under the tab `髪`. It exposes source hair, collider, frame range, maximum element length, minimum dynamic length, fixed-root node count, substeps, Newton iteration limit, cache path, and advanced material/contact parameters.
+The Extension is a Japanese-language panel in the 3D View sidebar under the tab `髪`. It exposes source hair, collider, frame range, maximum element length, minimum dynamic length, fixed-root node count, base and maximum adaptive substeps, Newton iteration limit, rollback-history length, cache path, and advanced material/contact parameters.
 
 The prepare phase:
 
@@ -176,11 +176,15 @@ The prepare phase:
 
 The solve phase runs the native CUDA calculation on a worker thread. The UI reports upload progress, current frame, substep, nonlinear iteration, elapsed time, and an estimated remaining time. Escape requests cancellation. Blender data is not edited from the worker thread.
 
-On a failed solve, the panel reports the last completed frame, failed frame, CUDA phase, substep, Newton iteration, and native exception. The rolled-back GPU state and the complete prefix of the `.未完成` cache are retained. The `失敗フレームから再開` action reapplies current numerical and material/contact parameters and retries the failed frame before continuing sequentially. Source objects, frame range, cache path, maximum element length, minimum dynamic length, and fixed-root node count cannot change during a resume because they define the preloaded animation or internal topology.
+At every completed frame boundary, the Extension stores an opaque native checkpoint containing all internal generalized coordinates, rotations, velocities, and the current animation index. A bounded in-memory history retains `checkpoint_frames + 1` states; the extra state makes the configured number of backward frame steps available. Checkpoints are valid only for the same live, built CUDA solver.
+
+On a failed solve, the panel reports the last completed frame, failed frame, CUDA phase, effective adaptive-substep sequence, and native exception. Moving-collider failures additionally report an offending strand, internal element, collider triangle, measured and required distance, collider displacement per substep and frame, and world-space detection coordinates. The complete prefix of the `.未完成` display cache is retained.
+
+The debug-resume box accepts an absolute resume frame inside the retained checkpoint range and provides failed-frame, -1, -5, and -10 shortcuts. Selecting frame `F` restores the complete state at the end of `F - 1`, truncates the incomplete display cache after `F - 1`, and recomputes from `F`. Numerical parameters can retry the same frame. Material and contact changes produce a recommendation to rewind at least one frame. Topology-defining changes are rejected and require a fresh bake. Parameter changes are recorded in the panel, and the calculation's initial parameter values can be restored.
 
 Successful completion and non-cancellation errors send `PING` to `127.0.0.1:8765/UDP` and expect `PONG`. Notification failure is displayed without changing the simulation result.
 
-The removed collider-inspection-copy operator is not part of version 0.4.0.
+The removed collider-inspection-copy operator is not part of version 0.5.1.
 
 ## 11. Default parameters
 
@@ -190,6 +194,7 @@ The removed collider-inspection-copy operator is not part of version 0.4.0.
 | --- | ---: |
 | Gravity | `(0, 0, -9.81)` m/s² |
 | Base substeps | 8 |
+| Maximum adaptive substeps | 32 |
 | Newton iterations | 24 |
 | Line-search iterations | 20 |
 | Absolute tolerance | `1e-8` |
@@ -201,7 +206,7 @@ The removed collider-inspection-copy operator is not part of version 0.4.0.
 | Minimum dynamic length | `0` m (disabled) |
 | Fixed root nodes | 2 |
 
-`thread_count` is present in ABI version 4 but is not used by the CUDA backend.
+`thread_count` is present in ABI version 5 but is not used by the CUDA backend.
 
 ### 11.2 Material and contact defaults
 
@@ -233,11 +238,11 @@ The `.khc` cache is a little-endian binary stream:
 
 The supported Windows build writes the header with the layout `<8sIII` and writes native 64-bit doubles, which are little-endian on the supported platform.
 
-The bake writes to a sibling file with the suffix `.未完成`. The final cache path is atomically replaced only after every requested frame succeeds. On cancellation or error, the incomplete file and its complete frame prefix are retained for same-session resume; the previous completed cache is left untouched. Resume validates the header and byte length, truncates any partial frame bytes, and appends from the first incomplete frame. Frame-change playback applies only the finalized cache and only when the current frame is inside the cache header's inclusive range.
+The bake writes to a sibling file with the suffix `.未完成`. The final cache path is atomically replaced only after every requested frame succeeds. On cancellation or error, the incomplete file and its complete frame prefix are retained for same-session resume; the previous completed cache is left untouched. Resume validates the header and byte length, truncates complete or partial data after the frame immediately preceding the selected resume frame, and appends recomputed output. The `.khc` stream stores display positions only; safe rewind is provided by the separate same-session opaque CUDA checkpoints. Frame-change playback applies only the finalized cache and only when the current frame is inside the cache header's inclusive range.
 
 ## 13. C API contract
 
-- Public ABI version: `KHS_ABI_VERSION == 4`.
+- Public ABI version: `KHS_ABI_VERSION == 5`.
 - Callers obtain defaults, create a solver, set hair and optional collider data, build, then either use per-frame updates or allocate/upload a full animation.
 - Full-animation frames must be uploaded completely before finalization and stepped in increasing sequential order.
 - Output APIs expose visible/original positions, all internal positions, and original-to-internal mapping.
@@ -245,8 +250,10 @@ The bake writes to a sibling file with the suffix `.未完成`. The final cache 
 - `khsGetLastError` returns the solver's most recent diagnostic string.
 - `khsRequestCancel` is cooperative and is observed during nonlinear solution.
 - `khsUpdateRuntimeParameters` preserves the current simulation state while updating numerical and material/contact parameters. Topology-defining parameters are rejected if changed.
+- Animation checkpoint APIs return the required opaque byte count and save or restore a frame-boundary state in the same live solver.
+- Failure diagnostics identify moving-collider sweep failures and expose the attempted adaptive range and geometric detection data.
 
-Some ABI fields are reserved by the present implementation: `objective_change`, `friction_energy`, `peak_temporary_bytes`, and the assembly/collision/optimization timing breakdown are not populated with independent measurements in version 0.4.0.
+Some ABI fields are reserved by the present implementation: `objective_change`, `friction_energy`, `peak_temporary_bytes`, and the assembly/collision/optimization timing breakdown are not populated with independent measurements in version 0.5.1.
 
 ## 14. Failure behavior and limitations
 
@@ -254,20 +261,23 @@ Some ABI fields are reserved by the present implementation: `objective_change`, 
 - Invisible extension is intentionally excluded from all collider contact and feasibility tests.
 - A sufficiently fast or deforming collider may still cross visible hair after the adaptive retry limit.
 - A difficult visible contact state may fail Gauss-Newton line search.
-- Resume is available only while the Blender session and its GPU solver remain alive; reopening Blender requires a new bake.
-- Although the Blender frame properties currently permit negative values, the version 0.4.0 cache header stores frame indices as unsigned 32-bit integers; attempting to bake a negative frame range fails during cache-header encoding.
+- Resume is available only inside the bounded in-memory checkpoint range and while the Blender session and its GPU solver remain alive; reopening Blender requires a new bake.
+- Checkpoint memory is approximately two arrays of six doubles per internal node for every retained state. The panel reports an estimate for the configured history.
+- Although the Blender frame properties currently permit negative values, the version 0.5.1 cache header stores frame indices as unsigned 32-bit integers; attempting to bake a negative frame range fails during cache-header encoding.
 - Hair-hair collision, self-collision, aerodynamic drag, wind, plasticity, cutting, remeshing during animation, and topology changes are not implemented.
 - Contact uses the closest collider triangle per rod element in an evaluation rather than assembling multiple simultaneous triangle contacts for that element.
 - The release has no CPU fallback and no binaries for architectures other than Windows x64 / `sm_120`.
 - Minimum dynamic length deliberately changes the dynamics of short visible hair and must be treated as an artist-selected surrogate parameter.
 
-## 15. Version 0.4.0 verification record
+## 15. Version 0.5.1 verification record
 
 The following checks passed for the source represented by this specification:
 
 - native core test suite;
 - public C API test suite;
 - Blender Extension smoke test using Blender 5.2;
+- opaque CUDA checkpoint save/restore determinism and backward-cache truncation tests;
+- moving-collider failure diagnostics and explicit adaptive-ceiling tests;
 - static intersection and moving-collider regression tests proving that invisible extension creates no collider candidates while visible contact tests remain active; and
 - a saved production scene benchmark covering frames 1–30.
 

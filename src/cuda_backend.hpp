@@ -72,11 +72,15 @@ public:
     virtual KhsResult finalize_animation() = 0;
     virtual KhsResult step(double frame_dt) = 0;
     virtual KhsResult step_animation_frame(uint32_t frame, double frame_dt) = 0;
+    virtual uint64_t animation_checkpoint_size() const = 0;
+    virtual KhsResult save_animation_checkpoint(void *data, uint64_t capacity) = 0;
+    virtual KhsResult restore_animation_checkpoint(const void *data, uint64_t size) = 0;
     virtual KhsResult copy_original_positions(KhsVec3 *positions, uint32_t capacity) const = 0;
     virtual KhsResult copy_internal_positions(KhsVec3 *positions, uint32_t capacity) const = 0;
     virtual KhsStepStats stats() const = 0;
     virtual KhsGpuStats gpu_stats() const = 0;
     virtual KhsProgress progress() const = 0;
+    virtual KhsFailureDiagnostics failure_diagnostics() const = 0;
     virtual void request_cancel() = 0;
     virtual std::string last_error() const = 0;
 };

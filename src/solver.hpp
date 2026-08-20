@@ -88,6 +88,9 @@ public:
     KhsResult set_collider_animation_frame(uint32_t frame, const KhsVec3 *vertices, uint32_t vertex_count);
     KhsResult finalize_animation();
     KhsResult step_animation_frame(uint32_t frame, double frame_dt);
+    uint64_t animation_checkpoint_size() const;
+    KhsResult save_animation_checkpoint(void *data, uint64_t capacity);
+    KhsResult restore_animation_checkpoint(const void *data, uint64_t size);
 
     uint32_t original_point_count() const { return static_cast<uint32_t>(input_points_.size()); }
     uint32_t internal_node_count() const { return static_cast<uint32_t>(nodes_.size()); }
@@ -98,6 +101,7 @@ public:
     KhsResult step_stats(KhsStepStats *stats) const;
     KhsResult gpu_stats(KhsGpuStats *stats) const;
     KhsResult progress(KhsProgress *progress) const;
+    KhsResult failure_diagnostics(KhsFailureDiagnostics *diagnostics) const;
     KhsResult request_cancel();
     const std::string &last_error() const { return error_; }
     void set_error(std::string message) { error_ = std::move(message); }

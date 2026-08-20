@@ -24,6 +24,7 @@ namespace {
 constexpr double kPi = 3.1415926535897932384626433832795;
 constexpr int kThreads = 128;
 constexpr int kBvhStack = 64;
+constexpr uint64_t kCheckpointMagic = 0x3154504348534bULL;
 
 struct DVec3 {
     double x, y, z;
@@ -161,7 +162,7 @@ struct DMaterial {
 };
 struct DDesc {
     DVec3 gravity;
-    uint32_t substeps,newton_iterations,line_search_iterations;
+    uint32_t substeps,maximum_substeps,newton_iterations,line_search_iterations;
     double absolute_tolerance,relative_tolerance,increment_tolerance;
     double minimum_line_search_step,minimum_gap;
 };
@@ -169,6 +170,20 @@ struct DAssemblyStats {
     double objective,elastic,contact,friction,kinetic,minimum_gap;
     unsigned long long candidates,active;
     int feasible;
+};
+
+struct DMovingSweepFailure {
+    int claimed;
+    uint32_t strand_index,element_index,triangle_index;
+    double distance,required_distance,clearance,collider_displacement;
+    DVec3 hair_start,hair_end,collider_point;
+};
+
+struct AnimationCheckpointHeader {
+    uint64_t magic;
+    uint32_t abi_version;
+    uint32_t animation_frame;
+    uint64_t dof_count;
 };
 
 __device__ void atomic_min_double(double *address,double value) {
@@ -270,7 +285,7 @@ __global__ void maximum_translation_kernel(const double*,const DNode*,uint32_t,d
 __global__ void node_energy_kernel(const double*,const double*,const double*,const DNode*,uint32_t,DDesc,DMaterial,double,double*,double*,DAssemblyStats*);
 __global__ void element_energy_kernel(const double*,const double*,const DNode*,const DElement*,uint32_t,DMaterial,DDesc,const DVec3*,const DVec3*,const DTriangle*,const DBvhNode*,const uint32_t*,bool,double*,double*,double*,DAssemblyStats*);
 __global__ void block_solve_kernel(const DStrand*,uint32_t,const double*,const double*,const double*,double*,double*,double*,int*);
-__global__ void moving_sweep_kernel(const double*,const DNode*,const DElement*,uint32_t,const DVec3*,const DVec3*,const DTriangle*,const DBvhNode*,const uint32_t*,DMaterial,DDesc,int*);
+__global__ void moving_sweep_kernel(const double*,const DNode*,const DElement*,uint32_t,const DVec3*,const DVec3*,const DTriangle*,const DBvhNode*,const uint32_t*,DMaterial,DDesc,int*,DMovingSweepFailure*);
 __global__ void ccd_limit_kernel(const double*,const double*,const DNode*,const DElement*,uint32_t,const DVec3*,const DTriangle*,const DBvhNode*,const uint32_t*,DMaterial,DDesc,double*);
 __global__ void friction_impulse_kernel(const double*,double*,const double*,const DNode*,const DElement*,uint32_t,const DVec3*,const DVec3*,const DTriangle*,const DBvhNode*,const uint32_t*,DMaterial,double);
 __global__ void gather_original_kernel(const double*,const uint32_t*,uint32_t,DVec3*);
@@ -332,7 +347,7 @@ public:
                          const std::vector<CudaTriangleInit> &collider_triangles) override
     {
         try {
-            desc_={make_vec(desc.gravity.x,desc.gravity.y,desc.gravity.z),desc.substeps,desc.newton_iterations,
+            desc_={make_vec(desc.gravity.x,desc.gravity.y,desc.gravity.z),desc.substeps,desc.maximum_substeps,desc.newton_iterations,
                 desc.line_search_iterations,desc.absolute_tolerance,desc.relative_tolerance,desc.increment_tolerance,
                 desc.minimum_line_search_step,desc.minimum_gap};
             material_={material.density,material.radius,material.young_modulus,material.poisson_ratio,
@@ -375,7 +390,7 @@ public:
             d_cprime_.allocate(size_t(node_count_)*36);d_dprime_.allocate(dof_count_);d_solve_failed_.allocate(1);
             d_root_current_.allocate(node_count_);d_root_current_.upload(hrp);d_rot_current_.allocate(node_count_);d_rot_current_.upload(hrr);
             d_root_pending_.allocate(node_count_);d_root_pending_.upload(hrp);d_rot_pending_.allocate(node_count_);d_rot_pending_.upload(hrr);
-            d_output_.allocate(std::max(node_count_,original_count_));d_stats_.allocate(1);d_feasible_.allocate(1);d_ccd_limit_.allocate(1);
+            d_output_.allocate(std::max(node_count_,original_count_));d_stats_.allocate(1);d_feasible_.allocate(1);d_ccd_limit_.allocate(1);d_sweep_failure_.allocate(1);
 
             if(collider_count_){d_collider_current_.allocate(collider_count_);d_collider_current_.upload(hcv);d_collider_old_.allocate(collider_count_);d_collider_old_.upload(hcv);
                 d_collider_frame_start_.allocate(collider_count_);d_collider_frame_start_.upload(hcv);d_collider_pending_.allocate(collider_count_);d_collider_pending_.upload(hcv);
@@ -385,7 +400,7 @@ public:
                 std::vector<uint32_t>flat;for(const auto&level:bvh.levels){level_offsets_.push_back(uint32_t(flat.size()));flat.insert(flat.end(),level.begin(),level.end());}level_offsets_.push_back(uint32_t(flat.size()));
                 d_level_indices_.allocate(flat.size());d_level_indices_.upload(flat);
             }
-            update_resident_bytes();
+            clear_failure_diagnostics();update_resident_bytes();
             initialized_=true;
             return KHS_OK;
         } catch(const std::exception&e){error_=std::string("CUDA initialization: ")+e.what();return KHS_ERROR_INTERNAL;}
@@ -401,7 +416,7 @@ public:
             std::vector<DNode>updated=host_nodes_;
             for(uint32_t i=0;i<node_count_;++i){updated[i].mass=masses[i];updated[i].rotational_mass=rotational_masses[i];}
             d_nodes_.upload(updated);
-            desc_={make_vec(desc.gravity.x,desc.gravity.y,desc.gravity.z),desc.substeps,desc.newton_iterations,
+            desc_={make_vec(desc.gravity.x,desc.gravity.y,desc.gravity.z),desc.substeps,desc.maximum_substeps,desc.newton_iterations,
                 desc.line_search_iterations,desc.absolute_tolerance,desc.relative_tolerance,desc.increment_tolerance,
                 desc.minimum_line_search_step,desc.minimum_gap};
             material_={material.density,material.radius,material.young_modulus,material.poisson_ratio,
@@ -482,6 +497,45 @@ public:
         if(r==KHS_OK)current_animation_frame_=frame;return r;
     }
 
+    uint64_t animation_checkpoint_size()const override
+    {
+        if(!initialized_||!animation_ready_)return 0;
+        return uint64_t(sizeof(AnimationCheckpointHeader))+uint64_t(2*dof_count_*sizeof(double));
+    }
+
+    KhsResult save_animation_checkpoint(void*data,uint64_t capacity) override
+    {
+        try {
+            const uint64_t required=animation_checkpoint_size();
+            if(!data||!required||capacity<required)return fail(KHS_ERROR_INVALID_ARGUMENT,"Invalid CUDA animation checkpoint output buffer.");
+            AnimationCheckpointHeader header{kCheckpointMagic,KHS_ABI_VERSION,current_animation_frame_,uint64_t(dof_count_)};
+            auto*out=static_cast<unsigned char*>(data);std::memcpy(out,&header,sizeof(header));
+            CUDA_TRY(cudaMemcpy(out+sizeof(header),d_q_.get(),d_q_.bytes(),cudaMemcpyDeviceToHost));
+            CUDA_TRY(cudaMemcpy(out+sizeof(header)+d_q_.bytes(),d_velocity_.get(),d_velocity_.bytes(),cudaMemcpyDeviceToHost));
+            error_.clear();return KHS_OK;
+        }catch(const std::exception&e){return fail(KHS_ERROR_INTERNAL,std::string("CUDA checkpoint save: ")+e.what());}
+    }
+
+    KhsResult restore_animation_checkpoint(const void*data,uint64_t size) override
+    {
+        try {
+            const uint64_t required=animation_checkpoint_size();
+            if(!data||!required||size!=required)return fail(KHS_ERROR_INVALID_ARGUMENT,"Invalid CUDA animation checkpoint size.");
+            AnimationCheckpointHeader header{};std::memcpy(&header,data,sizeof(header));
+            if(header.magic!=kCheckpointMagic||header.abi_version!=KHS_ABI_VERSION||header.dof_count!=dof_count_||header.animation_frame>=animation_frames_)
+                return fail(KHS_ERROR_INVALID_ARGUMENT,"CUDA animation checkpoint does not match this solver.");
+            const auto*in=static_cast<const unsigned char*>(data);
+            CUDA_TRY(cudaMemcpy(d_q_.get(),in+sizeof(header),d_q_.bytes(),cudaMemcpyHostToDevice));
+            CUDA_TRY(cudaMemcpy(d_velocity_.get(),in+sizeof(header)+d_q_.bytes(),d_velocity_.bytes(),cudaMemcpyHostToDevice));
+            CUDA_TRY(cudaMemcpy(d_old_q_.get(),d_q_.get(),d_q_.bytes(),cudaMemcpyDeviceToDevice));
+            CUDA_TRY(cudaMemcpy(d_snapshot_q_.get(),d_q_.get(),d_q_.bytes(),cudaMemcpyDeviceToDevice));
+            CUDA_TRY(cudaMemcpy(d_snapshot_velocity_.get(),d_velocity_.get(),d_velocity_.bytes(),cudaMemcpyDeviceToDevice));
+            current_animation_frame_=header.animation_frame;cancel_.store(false);progress_frame_.store(header.animation_frame);
+            progress_substep_.store(0);progress_substep_count_.store(0);progress_iteration_.store(0);progress_phase_.store(KHS_PHASE_FINISHED);
+            step_stats_={};step_stats_.struct_size=sizeof(step_stats_);step_stats_.phase=KHS_PHASE_FINISHED;clear_failure_diagnostics();error_.clear();return KHS_OK;
+        }catch(const std::exception&e){return fail(KHS_ERROR_INTERNAL,std::string("CUDA checkpoint restore: ")+e.what());}
+    }
+
     KhsResult copy_original_positions(KhsVec3*positions,uint32_t capacity)const override
     {
         if(!positions||capacity<original_count_)return KHS_ERROR_INVALID_ARGUMENT;try{gather_original_kernel<<<blocks(original_count_),kThreads>>>(d_q_.get(),d_mapping_.get(),original_count_,d_output_.get());CUDA_TRY(cudaGetLastError());
@@ -505,10 +559,28 @@ public:
         p.substep=progress_substep_.load();p.substep_count=progress_substep_count_.load();p.nonlinear_iteration=progress_iteration_.load();p.nonlinear_iteration_limit=desc_.newton_iterations;p.cancelled=cancel_.load()?1u:0u;
         p.frame_elapsed_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-frame_clock_).count();return p;
     }
+    KhsFailureDiagnostics failure_diagnostics()const override{return failure_diagnostics_;}
 
 private:
     static uint32_t blocks(uint32_t count){return (count+kThreads-1)/kThreads;}
     KhsResult fail(KhsResult result,std::string message){error_=std::move(message);step_stats_.phase=KHS_PHASE_FAILED;progress_phase_.store(KHS_PHASE_FAILED);return result;}
+
+    void clear_failure_diagnostics()
+    {
+        failure_diagnostics_={};failure_diagnostics_.struct_size=sizeof(failure_diagnostics_);
+        failure_diagnostics_.strand_index=std::numeric_limits<uint32_t>::max();
+        failure_diagnostics_.element_index=std::numeric_limits<uint32_t>::max();
+        failure_diagnostics_.collider_triangle_index=std::numeric_limits<uint32_t>::max();
+    }
+
+    void set_failure_context(uint32_t kind,uint32_t frame,uint32_t substep,
+                             uint32_t attempted,uint32_t maximum,uint32_t attempts)
+    {
+        failure_diagnostics_.kind=kind;failure_diagnostics_.frame_index=frame;
+        failure_diagnostics_.substep=substep;failure_diagnostics_.requested_substeps=desc_.substeps;
+        failure_diagnostics_.attempted_substeps=attempted;failure_diagnostics_.maximum_substeps=maximum;
+        failure_diagnostics_.adaptive_attempt_count=attempts;
+    }
 
     void update_resident_bytes()
     {
@@ -518,7 +590,7 @@ private:
             d_diagonal_blocks_.bytes()+d_upper_blocks_.bytes()+d_cprime_.bytes()+d_dprime_.bytes()+
             d_root_current_.bytes()+d_rot_current_.bytes()+d_root_pending_.bytes()+d_rot_pending_.bytes()+
             d_root_animation_.bytes()+d_rot_animation_.bytes()+d_collider_current_.bytes()+d_collider_old_.bytes()+d_collider_frame_start_.bytes()+
-            d_collider_pending_.bytes()+d_collider_animation_.bytes()+d_triangles_.bytes()+d_bvh_.bytes()+d_order_.bytes()+d_level_indices_.bytes()+d_leaves_.bytes()+d_output_.bytes();
+            d_collider_pending_.bytes()+d_collider_animation_.bytes()+d_triangles_.bytes()+d_bvh_.bytes()+d_order_.bytes()+d_level_indices_.bytes()+d_leaves_.bytes()+d_output_.bytes()+d_sweep_failure_.bytes();
     }
 
     void refit_bvh(bool swept)
@@ -618,20 +690,25 @@ private:
     KhsResult run_frame(double frame_dt,const DVec3*root_a,const DVec3*rot_a,const DVec3*root_b,const DVec3*rot_b,
                         const DVec3*collider_a,const DVec3*collider_b,uint32_t frame,uint32_t frame_count)
     {
-        if(!(frame_dt>0&&std::isfinite(frame_dt)))return fail(KHS_ERROR_INVALID_ARGUMENT,"Invalid CUDA time step.");cancel_.store(false);frame_clock_=std::chrono::steady_clock::now();progress_frame_.store(frame);progress_frame_count_.store(frame_count);
+        if(!(frame_dt>0&&std::isfinite(frame_dt)))return fail(KHS_ERROR_INVALID_ARGUMENT,"Invalid CUDA time step.");cancel_.store(false);clear_failure_diagnostics();frame_clock_=std::chrono::steady_clock::now();progress_frame_.store(frame);progress_frame_count_.store(frame_count);progress_iteration_.store(0);
         CUDA_TRY(cudaEventRecord(frame_begin_));CUDA_TRY(cudaMemcpy(d_snapshot_q_.get(),d_q_.get(),d_q_.bytes(),cudaMemcpyDeviceToDevice));CUDA_TRY(cudaMemcpy(d_snapshot_velocity_.get(),d_velocity_.get(),d_velocity_.bytes(),cudaMemcpyDeviceToDevice));
-        uint32_t substep_count=desc_.substeps;const uint32_t maximum_substeps=collider_count_?std::min(256u,desc_.substeps<=64?desc_.substeps*4:256u):desc_.substeps;
+        uint32_t substep_count=desc_.substeps;const uint32_t maximum_substeps=collider_count_?desc_.maximum_substeps:desc_.substeps;uint32_t adaptive_attempts=0;
         for(;;){
-            restore_snapshot();error_.clear();progress_phase_.store(KHS_PHASE_ASSEMBLING);progress_substep_count_.store(substep_count);
+            ++adaptive_attempts;restore_snapshot();clear_failure_diagnostics();error_.clear();progress_phase_.store(KHS_PHASE_ASSEMBLING);progress_substep_count_.store(substep_count);progress_iteration_.store(0);
             step_stats_={};step_stats_.struct_size=sizeof(step_stats_);step_stats_.substeps=substep_count;step_stats_.minimum_gap=std::numeric_limits<double>::infinity();step_stats_.ccd_step_limit=1.0;
             if(collider_count_){CUDA_TRY(cudaMemcpy(d_collider_current_.get(),collider_a,d_collider_current_.bytes(),cudaMemcpyDeviceToDevice));CUDA_TRY(cudaMemcpy(d_collider_frame_start_.get(),collider_a,d_collider_current_.bytes(),cudaMemcpyDeviceToDevice));}
             const double dt=frame_dt/substep_count;bool crossed=false;KhsResult attempt_result=KHS_OK;
-            for(uint32_t sub=1;sub<=substep_count;++sub){progress_substep_.store(sub);CUDA_TRY(cudaMemcpy(d_old_q_.get(),d_q_.get(),d_q_.bytes(),cudaMemcpyDeviceToDevice));const double fraction=double(sub)/substep_count;
+            for(uint32_t sub=1;sub<=substep_count;++sub){progress_substep_.store(sub);progress_iteration_.store(0);CUDA_TRY(cudaMemcpy(d_old_q_.get(),d_q_.get(),d_q_.bytes(),cudaMemcpyDeviceToDevice));const double fraction=double(sub)/substep_count;
                 begin_substep_kernel<<<blocks(node_count_),kThreads>>>(d_q_.get(),d_old_q_.get(),d_velocity_.get(),d_nodes_.get(),node_count_,root_a,rot_a,root_b,rot_b,fraction,dt);
                 if(collider_count_){CUDA_TRY(cudaMemcpy(d_collider_old_.get(),d_collider_current_.get(),d_collider_current_.bytes(),cudaMemcpyDeviceToDevice));interpolate_collider_kernel<<<blocks(collider_count_),kThreads>>>(d_collider_current_.get(),collider_a,collider_b,collider_count_,fraction);
-                    refit_bvh(true);int feasible=1;CUDA_TRY(cudaMemcpy(d_feasible_.get(),&feasible,sizeof(int),cudaMemcpyHostToDevice));moving_sweep_kernel<<<blocks(element_count_),kThreads>>>(d_q_.get(),d_nodes_.get(),d_elements_.get(),element_count_,d_collider_old_.get(),d_collider_current_.get(),d_triangles_.get(),d_bvh_.get(),d_order_.get(),material_,desc_,d_feasible_.get());
-                    CUDA_TRY(cudaMemcpy(&feasible,d_feasible_.get(),sizeof(int),cudaMemcpyDeviceToHost));if(!feasible){crossed=true;break;}refit_bvh(false);}
-                attempt_result=optimize_substep(dt);if(attempt_result!=KHS_OK)break;apply_friction(dt);++step_stats_.converged_substeps;
+                    refit_bvh(true);progress_phase_.store(KHS_PHASE_CCD);int feasible=1;DMovingSweepFailure sweep{};CUDA_TRY(cudaMemcpy(d_feasible_.get(),&feasible,sizeof(int),cudaMemcpyHostToDevice));CUDA_TRY(cudaMemcpy(d_sweep_failure_.get(),&sweep,sizeof(sweep),cudaMemcpyHostToDevice));moving_sweep_kernel<<<blocks(element_count_),kThreads>>>(d_q_.get(),d_nodes_.get(),d_elements_.get(),element_count_,d_collider_old_.get(),d_collider_current_.get(),d_triangles_.get(),d_bvh_.get(),d_order_.get(),material_,desc_,d_feasible_.get(),d_sweep_failure_.get());
+                    CUDA_TRY(cudaMemcpy(&feasible,d_feasible_.get(),sizeof(int),cudaMemcpyDeviceToHost));if(!feasible){CUDA_TRY(cudaMemcpy(&sweep,d_sweep_failure_.get(),sizeof(sweep),cudaMemcpyDeviceToHost));set_failure_context(KHS_FAILURE_MOVING_COLLIDER_SWEEP,frame,sub,substep_count,maximum_substeps,adaptive_attempts);
+                        if(sweep.claimed){failure_diagnostics_.strand_index=sweep.strand_index;failure_diagnostics_.element_index=sweep.element_index;failure_diagnostics_.collider_triangle_index=sweep.triangle_index;
+                            failure_diagnostics_.distance=sweep.distance;failure_diagnostics_.required_distance=sweep.required_distance;failure_diagnostics_.clearance=sweep.clearance;
+                            failure_diagnostics_.collider_substep_displacement=sweep.collider_displacement;failure_diagnostics_.collider_frame_displacement=sweep.collider_displacement*substep_count;
+                            failure_diagnostics_.hair_start={sweep.hair_start.x,sweep.hair_start.y,sweep.hair_start.z};failure_diagnostics_.hair_end={sweep.hair_end.x,sweep.hair_end.y,sweep.hair_end.z};failure_diagnostics_.collider_point={sweep.collider_point.x,sweep.collider_point.y,sweep.collider_point.z};}
+                        crossed=true;break;}refit_bvh(false);}
+                progress_phase_.store(KHS_PHASE_ASSEMBLING);attempt_result=optimize_substep(dt);if(attempt_result!=KHS_OK){if(!cancel_.load()){const uint32_t kind=error_.find("outside the barrier")!=std::string::npos?KHS_FAILURE_BARRIER_INFEASIBLE:KHS_FAILURE_NONLINEAR_SOLVE;set_failure_context(kind,frame,sub,substep_count,maximum_substeps,adaptive_attempts);}break;}apply_friction(dt);++step_stats_.converged_substeps;
             }
             if(!crossed&&attempt_result==KHS_OK)break;
             restore_snapshot();if(cancel_.load())return attempt_result;
@@ -640,7 +717,7 @@ private:
         }
         if(!animation_ready_){CUDA_TRY(cudaMemcpy(d_root_current_.get(),d_root_pending_.get(),d_root_current_.bytes(),cudaMemcpyDeviceToDevice));CUDA_TRY(cudaMemcpy(d_rot_current_.get(),d_rot_pending_.get(),d_rot_current_.bytes(),cudaMemcpyDeviceToDevice));
             if(collider_count_)CUDA_TRY(cudaMemcpy(d_collider_frame_start_.get(),d_collider_pending_.get(),d_collider_frame_start_.bytes(),cudaMemcpyDeviceToDevice));}
-        step_stats_.phase=KHS_PHASE_FINISHED;progress_phase_.store(KHS_PHASE_FINISHED);CUDA_TRY(cudaEventRecord(frame_end_));CUDA_TRY(cudaEventSynchronize(frame_end_));float ms=0;CUDA_TRY(cudaEventElapsedTime(&ms,frame_begin_,frame_end_));gpu_stats_.last_frame_milliseconds=ms;error_.clear();return KHS_OK;
+        clear_failure_diagnostics();step_stats_.phase=KHS_PHASE_FINISHED;progress_phase_.store(KHS_PHASE_FINISHED);CUDA_TRY(cudaEventRecord(frame_end_));CUDA_TRY(cudaEventSynchronize(frame_end_));float ms=0;CUDA_TRY(cudaEventElapsedTime(&ms,frame_begin_,frame_end_));gpu_stats_.last_frame_milliseconds=ms;error_.clear();return KHS_OK;
     }
 
     void restore_snapshot(){CUDA_TRY(cudaMemcpy(d_q_.get(),d_snapshot_q_.get(),d_q_.bytes(),cudaMemcpyDeviceToDevice));CUDA_TRY(cudaMemcpy(d_velocity_.get(),d_snapshot_velocity_.get(),d_velocity_.bytes(),cudaMemcpyDeviceToDevice));}
@@ -656,8 +733,8 @@ private:
     DeviceBuffer<DVec3>d_root_current_,d_rot_current_,d_root_pending_,d_rot_pending_,d_root_animation_,d_rot_animation_;
     DeviceBuffer<DVec3>d_collider_current_,d_collider_old_,d_collider_frame_start_,d_collider_pending_,d_collider_animation_,d_output_;
     DeviceBuffer<DTriangle>d_triangles_;DeviceBuffer<DBvhNode>d_bvh_;DeviceBuffer<uint32_t>d_order_,d_level_indices_,d_leaves_;
-    DeviceBuffer<DAssemblyStats>d_stats_;DeviceBuffer<int>d_feasible_;DeviceBuffer<double>d_ccd_limit_;
-    KhsStepStats step_stats_{};KhsGpuStats gpu_stats_{};std::string error_;
+    DeviceBuffer<DAssemblyStats>d_stats_;DeviceBuffer<int>d_feasible_;DeviceBuffer<double>d_ccd_limit_;DeviceBuffer<DMovingSweepFailure>d_sweep_failure_;
+    KhsStepStats step_stats_{};KhsGpuStats gpu_stats_{};KhsFailureDiagnostics failure_diagnostics_{};std::string error_;
     std::atomic<bool>cancel_{false};std::atomic<uint32_t>progress_phase_{KHS_PHASE_IDLE},progress_frame_{0},progress_frame_count_{0},progress_substep_{0},progress_substep_count_{0},progress_iteration_{0};
     std::chrono::steady_clock::time_point frame_clock_=std::chrono::steady_clock::now();
 };
@@ -886,18 +963,27 @@ __global__ void friction_impulse_kernel(const double*q,double*delta_velocity,con
     if(!nodes[e.j].fixed){const double scale=w1/fmax(nodes[e.j].mass,1.0e-30);atomicAdd(&delta_velocity[6*e.j],impulse.x*scale);atomicAdd(&delta_velocity[6*e.j+1],impulse.y*scale);atomicAdd(&delta_velocity[6*e.j+2],impulse.z*scale);}
 }
 
+__device__ void record_sweep_failure(DMovingSweepFailure*failure,const DElement&e,uint32_t ei,uint32_t ti,
+                                     DVec3 p0,DVec3 p1,const ClosestPair&pair,DVec3 a,DVec3 b,DVec3 c,
+                                     double target,double speed)
+{
+    if(atomicCAS(&failure->claimed,0,1)!=0)return;failure->strand_index=e.strand;failure->element_index=ei;failure->triangle_index=ti;
+    failure->distance=pair.distance;failure->required_distance=target;failure->clearance=pair.distance-target;failure->collider_displacement=speed;
+    failure->hair_start=p0;failure->hair_end=p1;failure->collider_point=a*pair.bary.x+b*pair.bary.y+c*pair.bary.z;
+}
+
 __global__ void moving_sweep_kernel(const double*q,const DNode*nodes,const DElement*elements,uint32_t element_count,
                                     const DVec3*old_collider,const DVec3*collider,const DTriangle*triangles,
-                                    const DBvhNode*bvh,const uint32_t*order,DMaterial material,DDesc desc,int*feasible)
+                                    const DBvhNode*bvh,const uint32_t*order,DMaterial material,DDesc desc,int*feasible,DMovingSweepFailure*failure)
 {
     const uint32_t ei=blockIdx.x*blockDim.x+threadIdx.x;if(ei>=element_count||!*feasible)return;const DElement&e=elements[ei];if(nodes[e.i].fixed||!e.collider_contact)return;
     const DVec3 p0=make_vec(q[6*e.i],q[6*e.i+1],q[6*e.i+2]),p1=make_vec(q[6*e.j],q[6*e.j+1],q[6*e.j+2]);
     const double target=material.radius+material.collider_offset+desc.minimum_gap;query_bvh(bvh,order,min_vec(p0,p1),max_vec(p0,p1),target,[&](uint32_t ti){
         const DTriangle&t=triangles[ti];const DVec3 da=collider[t.i0]-old_collider[t.i0],db=collider[t.i1]-old_collider[t.i1],dc=collider[t.i2]-old_collider[t.i2];
-        const double speed=fmax(norm(da),fmax(norm(db),norm(dc)));if(speed<1e-30)return;double alpha=0;bool end=false;
-        for(int k=0;k<80;++k){const double d=closest_segment_triangle(p0,p1,old_collider[t.i0]+da*alpha,old_collider[t.i1]+db*alpha,old_collider[t.i2]+dc*alpha).distance;
-            const double clearance=d-target;if(clearance<=0){atomicExch(feasible,0);return;}const double advance=0.8*clearance/speed;if(alpha+advance>=1){end=true;break;}if(advance<1e-12){atomicExch(feasible,0);return;}alpha+=advance;}
-        if(!end)atomicExch(feasible,0);});
+        const double speed=fmax(norm(da),fmax(norm(db),norm(dc)));if(speed<1e-30)return;double alpha=0;bool end=false;ClosestPair pair{};DVec3 a{},b{},c{};
+        for(int k=0;k<80;++k){a=old_collider[t.i0]+da*alpha;b=old_collider[t.i1]+db*alpha;c=old_collider[t.i2]+dc*alpha;pair=closest_segment_triangle(p0,p1,a,b,c);
+            const double clearance=pair.distance-target;if(clearance<=0){record_sweep_failure(failure,e,ei,ti,p0,p1,pair,a,b,c,target,speed);atomicExch(feasible,0);return;}const double advance=0.8*clearance/speed;if(alpha+advance>=1){end=true;break;}if(advance<1e-12){record_sweep_failure(failure,e,ei,ti,p0,p1,pair,a,b,c,target,speed);atomicExch(feasible,0);return;}alpha+=advance;}
+        if(!end){record_sweep_failure(failure,e,ei,ti,p0,p1,pair,a,b,c,target,speed);atomicExch(feasible,0);}});
 }
 
 __global__ void ccd_limit_kernel(const double*q,const double*direction,const DNode*nodes,const DElement*elements,
