@@ -58,4 +58,8 @@ Extension を有効にすると、3D View のサイドバーに「髪」タブ�
 
 実シーン（6757本、元74327点、内部265108節点、258351要素、Body 225184頂点）は、新しい接触既定値による1〜30フレームを完走しました。計算は6分36秒、最終GPUフレームは11.79秒、常駐CUDAメモリは約0.986 GiBでした。RTX 5070 Ti 16GB、Blender 5.2での実測であり、性能保証ではありません。
 
-ライセンスは GPL-3.0-or-later です。Eigen は MPL-2.0 のヘッダーライブラリとして使用します。
+## 謝辞と独立実装
+
+設計検討では、ZOZO, Inc. の公開プロジェクト [ppf-contact-solver](https://github.com/st-tech/ppf-contact-solver) を、特に接触バリア剛性とTOI制限付き時間進行の参考にしました。Kami Hair Solverは同プロジェクトのソースコードを取り込まず、髪用ソルバーとして独立に実装しています。この謝辞は、ZOZO, Inc.によるKami Hair Solverの承認、提携、著作、所有またはその他の権利帰属を示すものではなく、両プロジェクトそれぞれのライセンスと著作権を変更しません。
+
+ライセンスは GPL-3.0-or-later です。Eigen は MPL-2.0 のヘッダーライブラリとして使用します。ライセンス関係の補足は [Third-party notices](THIRD_PARTY_NOTICES.md) を参照してください。
