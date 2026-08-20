@@ -83,8 +83,8 @@ void khsDefaultSolverDesc(KhsSolverDesc *desc)
     desc->struct_size = sizeof(*desc);
     desc->gravity = {0.0, 0.0, -9.81};
     desc->substeps = 8;
-    desc->maximum_substeps = 32;
-    desc->newton_iterations = 24;
+    desc->maximum_substeps = 128;
+    desc->newton_iterations = 32;
     desc->line_search_iterations = 20;
     desc->absolute_tolerance = 1.0e-8;
     desc->relative_tolerance = 1.0e-5;
@@ -108,11 +108,11 @@ void khsDefaultHairMaterial(KhsHairMaterial *material)
     material->poisson_ratio = 0.38;
     material->shear_correction = 0.9;
     material->mass_damping = 8.0;
-    material->contact_stiffness = 1.0e4;
-    material->barrier_distance = 2.0e-4;
+    material->contact_stiffness = 1.0e5;
+    material->barrier_distance = 7.0e-4;
     material->friction = 0.35;
     material->friction_smoothing = 1.0e-6;
-    material->collider_offset = 0.0;
+    material->collider_offset = 5.0e-4;
 }
 
 KhsSolver *khsCreate(const KhsSolverDesc *desc)

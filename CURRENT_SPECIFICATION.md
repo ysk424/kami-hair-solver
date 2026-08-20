@@ -1,13 +1,13 @@
 # Kami Hair Solver — Current Specification
 
-**Software version:** 0.6.2<br>
+**Software version:** 0.6.3<br>
 **C ABI version:** 5<br>
 **Document status:** Current, as-built specification<br>
 **License:** GPL-3.0-or-later
 
 ## 1. Purpose and authority
 
-This document describes the behavior implemented in Kami Hair Solver version 0.6.2. It is an as-built record of the current research software, not an initial requirements document or a promise of future behavior. Earlier research plans and design specifications are superseded by this document. If this document and the version 0.6.2 source disagree, the source is authoritative and this document must be corrected.
+This document describes the behavior implemented in Kami Hair Solver version 0.6.3. It is an as-built record of the current research software, not an initial requirements document or a promise of future behavior. Earlier research plans and design specifications are superseded by this document. If this document and the version 0.6.3 source disagree, the source is authoritative and this document must be corrected.
 
 Kami Hair Solver computes Blender Hair Curves as geometrically nonlinear Cosserat rods with rotational degrees of freedom, implicit time integration, finite-element elasticity, barrier contact, and post-solve normal/Coulomb contact impulses. The production solver is CUDA-only. It does not use PBD, XPBD, position-constraint projection, or a CPU solver fallback.
 
@@ -22,7 +22,7 @@ Kami Hair Solver computes Blender Hair Curves as geometrically nonlinear Cossera
 - Linear algebra dependency: Eigen 3.3 or newer on the host and cuBLAS on the GPU.
 - Numerical precision: double precision for solver state, geometry, cache coordinates, and CUDA computation.
 
-The release build produces `kami_hair_solver.dll` and the Blender Extension archive `kami_hair_solver-0.6.2-windows-x64.zip`.
+The release build produces `kami_hair_solver.dll` and the Blender Extension archive `kami_hair_solver-0.6.3-windows-x64.zip`.
 
 ## 3. Components
 
@@ -116,7 +116,7 @@ The nonlinear solve fails when it starts outside the barrier-feasible region or 
 
 The configured base substep count partitions each animation frame into nominal intervals. Inside a nominal interval, conservative advancement evaluates the collider trajectory together with the hair trajectory predicted from its current velocity and gravity, and computes a safe temporal fraction before contact. Its safety clearance preserves 10% of the clearance present at the beginning of that proposal, capped by the larger of four minimum gaps and one quarter of the barrier distance; it therefore remains positive without demanding clearance that an already-active contact does not have. The collision-checked hair prediction is also the Newton initial iterate. The collider, root constraints, implicit prediction, velocity update, and contact impulses all use that same fraction, so prescribed and simulated motion remain on one physical clock. The unconsumed portion is then proposed again instead of uniformly subdividing the whole frame.
 
-Positions, velocities, and the collider pose are snapshotted before each accepted variable interval. A nonlinear failure restores only that interval and retries a half-sized span. A fatal error restores the complete frame snapshot. With a collider, the separately configured variable-time-step maximum bounds accepted intervals and local retry attempts; without a collider, the base partition is used directly. The Blender default is 8 base intervals and a maximum of 32; both fields accept explicit values up to 4096. Exhausting the budget or collapsing below the minimum temporal fraction returns an error and leaves the frame rolled back.
+Positions, velocities, and the collider pose are snapshotted before each accepted variable interval. A nonlinear failure restores only that interval and retries a half-sized span. A fatal error restores the complete frame snapshot. With a collider, the separately configured variable-time-step maximum bounds accepted intervals and local retry attempts; without a collider, the base partition is used directly. The Blender default is 8 base intervals and a maximum of 128; both fields accept explicit values up to 4096. Exhausting the budget or collapsing below the minimum temporal fraction returns an error and leaves the frame rolled back.
 
 ## 8. Collider and contact model
 
@@ -184,9 +184,9 @@ On a failed solve, the panel reports the last completed frame, failed frame, CUD
 
 The debug-resume box accepts an absolute resume frame inside the retained checkpoint range and provides failed-frame, -1, -5, and -10 shortcuts. Selecting frame `F` restores the complete state at the end of `F - 1`, truncates the incomplete display cache after `F - 1`, and recomputes from `F`. Numerical parameters can retry the same frame. Material and contact changes produce a recommendation to rewind at least one frame. Topology-defining changes are rejected and require a fresh bake. Parameter changes are recorded in the panel, and the calculation's initial parameter values can be restored.
 
-Successful completion and non-cancellation errors send `PING` to `127.0.0.1:8765/UDP` and expect `PONG`. Notification failure is displayed without changing the simulation result.
+Successful completion and non-cancellation errors send a best-effort `PING` to `127.0.0.1:8765/UDP`. The extension does not wait for a reply and silently ignores notification failure.
 
-The removed collider-inspection-copy operator is not part of version 0.6.2.
+The removed collider-inspection-copy operator is not part of version 0.6.3.
 
 ## 11. Default parameters
 
@@ -196,8 +196,8 @@ The removed collider-inspection-copy operator is not part of version 0.6.2.
 | --- | ---: |
 | Gravity | `(0, 0, -9.81)` m/s² |
 | Base substeps | 8 |
-| Maximum variable time steps | 32 |
-| Newton iterations | 24 |
+| Maximum variable time steps | 128 |
+| Newton iterations | 32 |
 | Line-search iterations | 20 |
 | Absolute tolerance | `1e-8` |
 | Relative tolerance | `1e-5` |
@@ -220,11 +220,13 @@ The removed collider-inspection-copy operator is not part of version 0.6.2.
 | Poisson ratio | `0.38` |
 | Shear correction | `0.9` |
 | Mass damping | `8.0` |
-| Contact barrier stiffness | `1e4` |
-| Barrier activation distance | `2e-4` m |
+| Contact barrier stiffness | `1e5` |
+| Barrier activation distance | `7e-4` m |
 | Friction coefficient | `0.35` |
 | Friction smoothing | `1e-6` |
-| Collider offset | `0` m |
+| Collider offset | `5e-4` m |
+
+The Blender extension additionally defaults to frames 1 through 100 and retains ten completed frame checkpoints for debugging rollback.
 
 ## 12. Result and cache format
 
@@ -255,7 +257,7 @@ The bake writes to a sibling file with the suffix `.未完成`. The final cache 
 - Animation checkpoint APIs return the required opaque byte count and save or restore a frame-boundary state in the same live solver.
 - Failure diagnostics identify moving-collider sweep failures and expose attempted variable intervals, TOI-limited attempts, and geometric detection data.
 
-Some ABI fields are reserved by the present implementation: `objective_change`, `friction_energy`, `peak_temporary_bytes`, and the assembly/collision/optimization timing breakdown are not populated with independent measurements in version 0.6.2.
+Some ABI fields are reserved by the present implementation: `objective_change`, `friction_energy`, `peak_temporary_bytes`, and the assembly/collision/optimization timing breakdown are not populated with independent measurements in version 0.6.3.
 
 ## 14. Failure behavior and limitations
 
@@ -265,13 +267,13 @@ Some ABI fields are reserved by the present implementation: `objective_change`, 
 - A difficult visible contact state may fail Gauss-Newton line search.
 - Resume is available only inside the bounded in-memory checkpoint range and while the Blender session and its GPU solver remain alive; reopening Blender requires a new bake.
 - Checkpoint memory is approximately two arrays of six doubles per internal node for every retained state. The panel reports an estimate for the configured history.
-- Although the Blender frame properties currently permit negative values, the version 0.6.2 cache header stores frame indices as unsigned 32-bit integers; attempting to bake a negative frame range fails during cache-header encoding.
+- Although the Blender frame properties currently permit negative values, the version 0.6.3 cache header stores frame indices as unsigned 32-bit integers; attempting to bake a negative frame range fails during cache-header encoding.
 - Hair-hair collision, self-collision, aerodynamic drag, wind, plasticity, cutting, remeshing during animation, and topology changes are not implemented.
 - Contact uses the closest collider triangle per rod element in an evaluation rather than assembling multiple simultaneous triangle contacts for that element.
 - The release has no CPU fallback and no binaries for architectures other than Windows x64 / `sm_120`.
 - Minimum dynamic length deliberately changes the dynamics of short visible hair and must be treated as an artist-selected surrogate parameter.
 
-## 15. Version 0.6.2 verification record
+## 15. Version 0.6.3 verification record
 
 The following checks passed for the source represented by this specification:
 
@@ -283,7 +285,9 @@ The following checks passed for the source represented by this specification:
 - static intersection and moving-collider regression tests proving that invisible extension creates no collider candidates while visible contact tests remain active; and
 - Blender 5.2 extension packaging and installation smoke tests.
 
-The preceding 0.5.1 production-scene baseline used 6,757 strands, 74,327 visible points, 278,919 internal nodes, 272,162 elements, and `minimum_dynamic_length = 0.2 m`. It created 13,811 invisible nodes on 1,408 strands with 131.016 m total invisible rest length. With 8 base substeps and 24 Newton iterations on an RTX 5070 Ti, all 30 frames completed. Preparation took approximately 17.95 seconds and dynamic stepping took approximately 194.65 seconds; resident GPU allocation was approximately 1.003 GiB. This historical baseline has not yet been rerun with the 0.6.2 variable-time-step algorithm and is not a performance guarantee.
+The 0.6.2 worktree production scene used 6,757 strands, 74,327 visible points, 265,108 internal nodes, 258,351 elements, and a 225,184-vertex body collider. With the contact defaults adopted by 0.6.3, frames 1 through 30 completed in 6 minutes 36 seconds; the final GPU frame took 11.79 seconds and resident CUDA allocation was approximately 0.986 GiB on an RTX 5070 Ti. This is a stability record, not a performance guarantee.
+
+The preceding 0.5.1 production-scene baseline used 6,757 strands, 74,327 visible points, 278,919 internal nodes, 272,162 elements, and `minimum_dynamic_length = 0.2 m`. It created 13,811 invisible nodes on 1,408 strands with 131.016 m total invisible rest length. With 8 base substeps and 24 Newton iterations on an RTX 5070 Ti, all 30 frames completed. Preparation took approximately 17.95 seconds and dynamic stepping took approximately 194.65 seconds; resident GPU allocation was approximately 1.003 GiB. This historical baseline predates the variable-time-step algorithm and is not a performance guarantee.
 
 ## 16. Licensing
 

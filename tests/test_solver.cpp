@@ -203,6 +203,7 @@ void test_initial_intersection_rejected()
     KhsSolver *solver = khsCreate(&desc);
     KhsHairMaterial material;
     khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
     material.radius = 1.0e-3;
     material.barrier_distance = 2.0e-3;
     const KhsVec3 points[]{{-0.2, 0.0, 0.2}, {-0.1, 0.0, 0.1}, {0.1, 0.0, -0.1}};
@@ -226,6 +227,7 @@ void test_barrier_contact_remains_feasible()
     KhsSolver *solver = khsCreate(&desc);
     KhsHairMaterial material;
     khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
     material.radius = 2.0e-4;
     material.young_modulus = 1.0e6;
     material.contact_stiffness = 100.0;
@@ -261,6 +263,7 @@ void test_moving_collider_tunnelling_rejected()
     KhsSolver *solver = khsCreate(&desc);
     KhsHairMaterial material;
     khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
     material.radius = 1.0e-3;
     const KhsVec3 points[]{{-0.2, 0.0, 0.0}, {-0.1, 0.0, 0.0}, {0.1, 0.0, 0.0}};
     const uint32_t offsets[]{0, 3};
@@ -301,6 +304,7 @@ void test_moving_collider_uses_variable_toi_steps()
     assert(solver);
     KhsHairMaterial material;
     khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
     material.radius = 1.0e-3;
     material.young_modulus = 1.0e6;
     material.contact_stiffness = 100.0;
@@ -364,6 +368,7 @@ void test_moving_collider_preserves_small_existing_clearance()
     assert(solver);
     KhsHairMaterial material;
     khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
     material.radius = 1.0e-3;
     material.young_modulus = 1.0e6;
     material.contact_stiffness = 100.0;
@@ -402,6 +407,7 @@ void test_moving_collider_transfers_normal_velocity_to_hair()
     assert(solver);
     KhsHairMaterial material;
     khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
     material.radius = 4.0e-5;
     material.young_modulus = 4.0e9;
     material.contact_stiffness = 1.0e4;

@@ -2,7 +2,7 @@
 
 Blender 5.2 の Hair Curves を、回転自由度付きの幾何学的非線形 Cosserat ロッド有限要素として計算する Windows x64 DLL と Blender Extension です。
 
-Version 0.6.2 の実装済み挙動は、英語版の [Current Specification](CURRENT_SPECIFICATION.md) に記録しています。これは初期要求ではなく、現行コードのas-built仕様です。
+Version 0.6.3 の実装済み挙動は、英語版の [Current Specification](CURRENT_SPECIFICATION.md) に記録しています。これは初期要求ではなく、現行コードのas-built仕様です。
 
 この実装は PBD／XPBD／位置拘束投影を使用しません。慣性、ロッド弾性、バリア接触をCUDA上の増分ポテンシャルとして評価し、ストランド並列Gauss-Newton、BVH、TOI制限付き可変時間ステップ、CCD line searchで実行可能解を求めます。各時間区間後にGPU接触インパルスで閉じる法線相対速度を除去し、Coulomb摩擦を適用します。CPUソルバーへのフォールバックはありません。
 
@@ -28,7 +28,7 @@ cmake --build build-cuda --target blender-extension-test
 cmake --build build-cuda --target blender-extension
 ```
 
-CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.6.2-windows-x64.zip` です。
+CUDA 12.9、Visual Studio 2022、Compute Capability 12.0を使用します。成果物は `build-cuda/kami_hair_solver.dll` と `build-cuda/packages/kami_hair_solver-0.6.3-windows-x64.zip` です。
 
 ## Blender での使用
 
@@ -40,7 +40,7 @@ Extension を有効にすると、3D View のサイドバーに「髪」タブ�
 4. 「髪を計算」で全フレームをGPUへ転送してからベイクします。転送・フレーム・可変時間ステップ・反復・残り時間をパネルに表示し、Escで中止できます。
 5. 計算に失敗した場合は詳細表示を確認し、保持範囲内の「再開フレーム」を指定して数フレーム前から再計算できます。`失敗位置 / -1 / -5 / -10` のショートカット、パラメータ変更履歴、変更種別に応じた巻き戻し警告も表示します。
 
-正常完了またはエラー終了時には `127.0.0.1:8765/UDP` へ `PING` を送り、`PONG` 応答を確認します。通知用アプリが応答しない場合は、シミュレーション結果を変えずに通知エラーをパネルへ表示します。
+正常完了またはエラー終了時には `127.0.0.1:8765/UDP` へ `PING` を送ります。応答は待たず、通知先が応答しない場合もシミュレーション結果と表示を変えません。
 
 元 Hair Curves は変更しません。結果はワールド座標の別オブジェクト「髪_計算結果」と、倍精度の `.khc` キャッシュへ保存します。フレーム変更時にキャッシュから元点数の座標を読み戻します。内部細分点を含む有限要素メッシュは DLL 内だけに保持します。
 
@@ -56,6 +56,6 @@ Extension を有効にすると、3D View のサイドバーに「髪」タブ�
 - 固定毛根要素は Dirichlet 境界として扱い、頭皮へ埋め込まれる固定部分を接触候補から除外します。
 - 接触可能な初期状態を要求します。初期交差を押し戻して続行しません。
 
-実シーン（6757本、元74327点、内部265108節点、258351要素、Body 225184頂点）の1〜30フレーム実測は、準備18.38秒、計算194.36秒、常駐VRAM 0.963 GiBでした。RTX 5070 Ti 16GB、Blender 5.2、既定設定での値です。
+実シーン（6757本、元74327点、内部265108節点、258351要素、Body 225184頂点）は、新しい接触既定値による1〜30フレームを完走しました。計算は6分36秒、最終GPUフレームは11.79秒、常駐CUDAメモリは約0.986 GiBでした。RTX 5070 Ti 16GB、Blender 5.2での実測であり、性能保証ではありません。
 
 ライセンスは GPL-3.0-or-later です。Eigen は MPL-2.0 のヘッダーライブラリとして使用します。

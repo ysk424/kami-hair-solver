@@ -78,7 +78,7 @@ def _get_maximum_substeps(settings):
         stored = settings.get("maximum_substeps")
     if stored is not None:
         return int(stored)
-    return min(4096, max(1, int(settings.substeps) * 4))
+    return min(4096, max(128, int(settings.substeps)))
 
 
 def _set_maximum_substeps(settings, value):
@@ -90,13 +90,13 @@ class HairSettings(PropertyGroup):
     collider: PointerProperty(name="衝突メッシュ", type=bpy.types.Object, poll=_mesh_poll)
     result: PointerProperty(name="計算結果の髪", type=bpy.types.Object)
     frame_start: IntProperty(name="開始フレーム", default=1, min=-1048574, max=1048574)
-    frame_end: IntProperty(name="終了フレーム", default=30, min=-1048574, max=1048574)
+    frame_end: IntProperty(name="終了フレーム", default=100, min=-1048574, max=1048574)
     substeps: IntProperty(name="基本サブステップ", default=8, min=1, max=4096)
     maximum_substeps: IntProperty(
         name="可変時間ステップ上限",
         description="TOI制限や求解失敗の局所再試行を含め、1フレームで使用できる時間区間の上限",
         min=1, max=4096, get=_get_maximum_substeps, set=_set_maximum_substeps)
-    newton_iterations: IntProperty(name="Newton反復上限", default=24, min=2, max=100)
+    newton_iterations: IntProperty(name="Newton反復上限", default=32, min=2, max=100)
     checkpoint_frames: IntProperty(
         name="巻き戻し保持フレーム数",
         description="デバッグ再開用に完全なCUDA状態をメモリへ保持する過去フレーム数",
@@ -116,13 +116,13 @@ class HairSettings(PropertyGroup):
     young_modulus: FloatProperty(name="Young率", default=4.0e9, min=1.0e3, soft_max=1.0e10)
     poisson_ratio: FloatProperty(name="Poisson比", default=0.38, min=-0.99, max=0.499)
     mass_damping: FloatProperty(name="質量比例減衰", default=8.0, min=0.0, soft_max=30.0)
-    contact_stiffness: FloatProperty(name="接触バリア剛性", default=1.0e4, min=1.0e-3, soft_max=1.0e6)
+    contact_stiffness: FloatProperty(name="接触バリア剛性", default=1.0e5, min=1.0e-3, soft_max=1.0e6)
     barrier_distance: FloatProperty(
-        name="バリア活性距離", default=2.0e-4, min=1.0e-7, soft_max=0.01,
+        name="バリア活性距離", default=7.0e-4, min=1.0e-7, soft_max=0.01,
         subtype="DISTANCE", unit="LENGTH")
     friction: FloatProperty(name="摩擦係数", default=0.35, min=0.0, soft_max=1.5)
     collider_offset: FloatProperty(
-        name="コライダー間隔", default=0.0, min=0.0, soft_max=0.01,
+        name="コライダー間隔", default=5.0e-4, min=0.0, soft_max=0.01,
         subtype="DISTANCE", unit="LENGTH")
     cache_path: StringProperty(name="髪キャッシュ", default="//髪キャッシュ.khc", subtype="FILE_PATH")
     show_advanced: BoolProperty(name="詳細設定", default=False)
@@ -133,16 +133,12 @@ class HairSettings(PropertyGroup):
 
 
 def _notify_codex():
-    """Notify the local terminal helper without changing the simulation result."""
+    """Send a best-effort local notification without waiting for a reply."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-            client.settimeout(1.0)
             client.sendto(b"PING", ("127.0.0.1", 8765))
-            response, _remote = client.recvfrom(64)
-        if response.strip().upper() != b"PONG":
-            return f"8765/UDPから予期しない応答を受信しました: {response!r}"
-    except OSError as exception:
-        return f"8765/UDP通知に失敗しました: {exception}"
+    except OSError:
+        pass
     return None
 
 

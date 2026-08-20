@@ -78,11 +78,43 @@ def main():
     import kami_hair_solver
     from kami_hair_solver import addon
 
+    sent_notifications = []
+
+    class NotificationSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def sendto(self, payload, address):
+            sent_notifications.append((payload, address))
+
+        def recvfrom(self, _size):
+            raise AssertionError("UDP notification must not wait for a reply")
+
+    original_socket = addon.socket.socket
+    addon.socket.socket = lambda *_args, **_kwargs: NotificationSocket()
+    try:
+        assert addon._notify_codex() is None
+    finally:
+        addon.socket.socket = original_socket
+    assert sent_notifications == [(b"PING", ("127.0.0.1", 8765))]
+
     notifications = []
     addon._notify_codex = lambda: notifications.append("PING") or None
 
     kami_hair_solver.register()
     scene = bpy.context.scene
+    defaults = scene.kami_hair
+    assert defaults.frame_start == 1
+    assert defaults.frame_end == 100
+    assert defaults.substeps == 8
+    assert defaults.maximum_substeps == 128
+    assert defaults.newton_iterations == 32
+    assert abs(defaults.contact_stiffness - 1.0e5) < 1.0e-3
+    assert abs(defaults.barrier_distance - 7.0e-4) < 1.0e-9
+    assert abs(defaults.collider_offset - 5.0e-4) < 1.0e-9
 
     hair_data = bpy.data.hair_curves.new("髪_入力データ")
     hair_data.add_curves([5])
