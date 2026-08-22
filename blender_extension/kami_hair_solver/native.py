@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
-ABI_VERSION = 5
+ABI_VERSION = 8
 OK = 0
 
 
@@ -35,6 +35,7 @@ class SolverDesc(ctypes.Structure):
         ("minimum_dynamic_length", ctypes.c_double),
         ("fixed_root_nodes", ctypes.c_uint32),
         ("thread_count", ctypes.c_uint32),
+        ("collider_anchor_stiffness", ctypes.c_double),
     ]
 
 
@@ -77,6 +78,7 @@ class BuildStats(ctypes.Structure):
         ("degree_of_freedom_count", ctypes.c_uint64),
         ("estimated_bytes", ctypes.c_uint64),
         ("initial_minimum_gap", ctypes.c_double),
+        ("soft_collider_degree_of_freedom_count", ctypes.c_uint64),
     ]
 
 
@@ -88,8 +90,14 @@ class StepStats(ctypes.Structure):
         ("newton_iterations", ctypes.c_uint32),
         ("linear_solves", ctypes.c_uint32),
         ("line_search_evaluations", ctypes.c_uint32),
+        ("soft_collider_substeps", ctypes.c_uint32),
+        ("soft_collider_attempts", ctypes.c_uint32),
+        ("soft_collider_retry_attempts", ctypes.c_uint32),
+        ("sweep_guard_reductions", ctypes.c_uint32),
+        ("hard_iteration_limit_retries", ctypes.c_uint32),
         ("contact_candidate_count", ctypes.c_uint64),
         ("active_contact_count", ctypes.c_uint64),
+        ("moving_sweep_candidate_count", ctypes.c_uint64),
         ("initial_residual_norm", ctypes.c_double),
         ("final_residual_norm", ctypes.c_double),
         ("relative_residual_norm", ctypes.c_double),
@@ -102,6 +110,10 @@ class StepStats(ctypes.Structure):
         ("elastic_energy", ctypes.c_double),
         ("contact_energy", ctypes.c_double),
         ("friction_energy", ctypes.c_double),
+        ("collider_anchor_energy", ctypes.c_double),
+        ("collider_maximum_displacement", ctypes.c_double),
+        ("maximum_predicted_displacement", ctypes.c_double),
+        ("sweep_displacement_limit", ctypes.c_double),
         ("phase", ctypes.c_int),
     ]
 
@@ -142,6 +154,10 @@ class Progress(ctypes.Structure):
         ("nonlinear_iteration", ctypes.c_uint32),
         ("nonlinear_iteration_limit", ctypes.c_uint32),
         ("cancelled", ctypes.c_uint32),
+        ("attempted_substeps", ctypes.c_uint32),
+        ("accepted_substeps", ctypes.c_uint32),
+        ("sweep_guard_reductions", ctypes.c_uint32),
+        ("soft_collider_attempts", ctypes.c_uint32),
         ("frame_elapsed_seconds", ctypes.c_double),
     ]
 
@@ -250,6 +266,10 @@ class HairSolver:
         lib.khsGetOriginalPointCount.restype = ctypes.c_uint32
         lib.khsCopyOriginalPositions.argtypes = [ctypes.c_void_p, ctypes.POINTER(Vec3), ctypes.c_uint32]
         lib.khsCopyOriginalPositions.restype = ctypes.c_int
+        lib.khsGetColliderVertexCount.argtypes = [ctypes.c_void_p]
+        lib.khsGetColliderVertexCount.restype = ctypes.c_uint32
+        lib.khsCopyColliderPositions.argtypes = [ctypes.c_void_p, ctypes.POINTER(Vec3), ctypes.c_uint32]
+        lib.khsCopyColliderPositions.restype = ctypes.c_int
         lib.khsGetBuildStats.argtypes = [ctypes.c_void_p, ctypes.POINTER(BuildStats)]
         lib.khsGetBuildStats.restype = ctypes.c_int
         lib.khsGetLastStepStats.argtypes = [ctypes.c_void_p, ctypes.POINTER(StepStats)]
@@ -402,6 +422,14 @@ class HairSolver:
         count = self._library.khsGetOriginalPointCount(self._handle)
         output = (Vec3 * count)()
         self._check(self._library.khsCopyOriginalPositions(self._handle, output, count))
+        return [(v.x, v.y, v.z) for v in output]
+
+    def collider_positions(self):
+        count = self._library.khsGetColliderVertexCount(self._handle)
+        if not count:
+            return []
+        output = (Vec3 * count)()
+        self._check(self._library.khsCopyColliderPositions(self._handle, output, count))
         return [(v.x, v.y, v.z) for v in output]
 
     def close(self):

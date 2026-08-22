@@ -20,6 +20,12 @@ def point_positions(obj):
     return [tuple(flat[3 * i:3 * i + 3]) for i in range(len(obj.data.points))]
 
 
+def mesh_positions(obj):
+    flat = [0.0] * (len(obj.data.vertices) * 3)
+    obj.data.vertices.foreach_get("co", flat)
+    return [tuple(flat[3 * i:3 * i + 3]) for i in range(len(obj.data.vertices))]
+
+
 def test_incomplete_cache_resume(addon, directory):
     class FakeSolver:
         def __init__(self):
@@ -106,7 +112,7 @@ def main():
 
     kami_hair_solver.register()
     scene = bpy.context.scene
-    defaults = scene.kami_hair
+    defaults = scene.kami_hair_3
     assert defaults.frame_start == 1
     assert defaults.frame_end == 100
     assert defaults.substeps == 8
@@ -115,6 +121,8 @@ def main():
     assert abs(defaults.contact_stiffness - 1.0e5) < 1.0e-3
     assert abs(defaults.barrier_distance - 7.0e-4) < 1.0e-9
     assert abs(defaults.collider_offset - 5.0e-4) < 1.0e-9
+    assert defaults.soft_collider is False
+    assert abs(defaults.collider_anchor_stiffness - 1.0e8) < 1.0
 
     hair_data = bpy.data.hair_curves.new("髪_入力データ")
     hair_data.add_curves([5])
@@ -143,7 +151,7 @@ def main():
     deform.value = 1.0
     deform.keyframe_insert("value", frame=2)
 
-    settings = scene.kami_hair
+    settings = scene.kami_hair_3
     settings.hair = hair
     settings.collider = collider
     settings.frame_start = 1
@@ -155,6 +163,8 @@ def main():
     settings.minimum_dynamic_length = 0.10
     settings.fixed_root_nodes = 2
     settings.young_modulus = 1.0e7
+    settings.soft_collider = True
+    settings.collider_anchor_stiffness = 1.0e8
     settings.cache_path = str(stage.parent / "髪_試験キャッシュ.khc")
     original_settings = addon._settings_snapshot(settings)
     settings.barrier_distance *= 2.0
@@ -181,6 +191,8 @@ def main():
     assert abs(stats.virtual_extension_rest_length - 0.06) < 1.0e-6
     assert settings.result is not hair
     assert settings.result.name.startswith("髪_計算結果")
+    assert settings.collider_result is not collider
+    assert settings.collider_result.name.startswith("softコライダー_計算結果")
     solver = addon._SESSIONS[scene.as_pointer()]["solver"]
     assert solver.checkpoint_size() > 0
     solver.desc.substeps = 9
@@ -201,6 +213,8 @@ def main():
         print("FAILED_STATS", {name: getattr(native_stats, name) for name, _kind in native_stats._fields_})
         raise
     assert Path(settings.cache_path).exists()
+    collider_cache = Path(settings.collider_result["softコライダーキャッシュ"])
+    assert collider_cache.exists()
     assert result.get("髪解法")
     assert point_positions(hair) == source_before
     scene.frame_set(1)
@@ -209,8 +223,14 @@ def main():
     second = point_positions(result)
     assert len(first) == len(second) == 5
     assert first[0] == second[0]
+    scene.frame_set(1)
+    first_collider = mesh_positions(settings.collider_result)
+    scene.frame_set(2)
+    second_collider = mesh_positions(settings.collider_result)
+    assert len(first_collider) == len(second_collider) == 5
+    assert first_collider != second_collider
     assert settings.status.startswith("計算完了")
-    assert addon.KAMI_PT_panel.bl_label == "髪"
+    assert addon.KAMI3_PT_panel.bl_label == "髪3・soft実験"
     assert notifications == ["PING"]
     test_incomplete_cache_resume(addon, stage.parent)
     successful_status = settings.status

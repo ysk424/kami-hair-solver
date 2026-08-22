@@ -77,6 +77,7 @@ public:
     virtual KhsResult restore_animation_checkpoint(const void *data, uint64_t size) = 0;
     virtual KhsResult copy_original_positions(KhsVec3 *positions, uint32_t capacity) const = 0;
     virtual KhsResult copy_internal_positions(KhsVec3 *positions, uint32_t capacity) const = 0;
+    virtual KhsResult copy_collider_positions(KhsVec3 *positions, uint32_t capacity) const = 0;
     virtual KhsStepStats stats() const = 0;
     virtual KhsGpuStats gpu_stats() const = 0;
     virtual KhsProgress progress() const = 0;

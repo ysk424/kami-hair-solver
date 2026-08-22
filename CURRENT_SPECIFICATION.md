@@ -1,13 +1,13 @@
 # Kami Hair Solver — Current Specification
 
-**Software version:** 0.6.3<br>
-**C ABI version:** 5<br>
+**Software version:** 0.7.2 experimental<br>
+**C ABI version:** 8<br>
 **Document status:** Current, as-built specification<br>
 **License:** GPL-3.0-or-later
 
 ## 1. Purpose and authority
 
-This document describes the behavior implemented in Kami Hair Solver version 0.6.3. It is an as-built record of the current research software, not an initial requirements document or a promise of future behavior. Earlier research plans and design specifications are superseded by this document. If this document and the version 0.6.3 source disagree, the source is authoritative and this document must be corrected.
+This document describes the behavior implemented in the experimental Kami Hair Solver 3 version 0.7.2. It is an as-built record of the current research software, not an initial requirements document or a promise of future behavior. Earlier research plans and design specifications are superseded by this document. If this document and the version 0.7.2 source disagree, the source is authoritative and this document must be corrected.
 
 Kami Hair Solver computes Blender Hair Curves as geometrically nonlinear Cosserat rods with rotational degrees of freedom, implicit time integration, finite-element elasticity, barrier contact, and post-solve normal/Coulomb contact impulses. The production solver is CUDA-only. It does not use PBD, XPBD, position-constraint projection, or a CPU solver fallback.
 
@@ -20,9 +20,9 @@ Kami Hair Solver computes Blender Hair Curves as geometrically nonlinear Cossera
 - GPU code target: Compute Capability 12.0 (`sm_120`).
 - Tested GPU: NVIDIA GeForce RTX 5070 Ti with 16 GiB VRAM.
 - Linear algebra dependency: Eigen 3.3 or newer on the host and cuBLAS on the GPU.
-- Numerical precision: double precision for solver state, geometry, cache coordinates, and CUDA computation.
+- Numerical precision: double precision for solver state, geometry, hair-cache coordinates, and CUDA computation. The optional soft-collider display sidecar is 32-bit float.
 
-The release build produces `kami_hair_solver.dll` and the Blender Extension archive `kami_hair_solver-0.6.3-windows-x64.zip`.
+The release build produces `kami_hair_solver.dll` and the Blender Extension archive `kami_hair_solver_3-0.7.2-windows-x64.zip`.
 
 ## 3. Components
 
@@ -99,22 +99,25 @@ Gravity enters the implicit prediction. Contact impulses are not included in the
 For each time interval, the CUDA backend:
 
 1. proposes the remaining span of the configured base interval;
-2. predicts hair translation from velocity and gravity, then uses conservative advancement to limit the relative hair-collider trajectory to a safe TOI;
-3. advances the animated roots and collider to the same limited end time;
-4. initializes free nodes at the same collision-checked velocity-and-gravity prediction using the corresponding physical `dt`;
-5. assembles the incremental potential, gradient, and a positive Gauss-Newton block approximation;
-6. solves a per-strand block-tridiagonal linear system;
-7. falls back to a diagonally preconditioned steepest-descent direction if the block direction fails or is not a descent direction;
-8. limits excessive translation by a trust radius;
-9. limits the hair search direction with segment-triangle CCD;
-10. performs Armijo backtracking line search; and
-11. updates velocity, removes closing normal relative velocity, applies friction, and continues the unconsumed frame time.
+2. predicts hair translation from velocity and gravity and reduces the proposal before BVH traversal when the maximum translation exceeds the sweep displacement limit;
+3. uses batched conservative advancement to limit the relative hair-collider trajectory to a safe TOI, reducing and retrying a proposal when one hair element would enumerate more than 512 collider candidates;
+4. advances the animated roots and collider to the same limited end time;
+5. initializes free nodes at the same collision-checked velocity-and-gravity prediction using the corresponding physical `dt`;
+6. assembles the incremental potential, gradient, and a positive Gauss-Newton block approximation;
+7. solves a per-strand block-tridiagonal linear system;
+8. falls back to a diagonally preconditioned steepest-descent direction if the block direction fails or is not a descent direction;
+9. limits excessive translation by a trust radius;
+10. limits the hair search direction with segment-triangle CCD;
+11. performs Armijo backtracking line search; and
+12. updates velocity, removes closing normal relative velocity, applies friction, and continues the unconsumed frame time.
 
-The nonlinear solve fails when it starts outside the barrier-feasible region or cannot find an acceptable line-search step. Reaching the configured Newton iteration budget by itself accepts the last feasible iterate. Cancellation is checked during nonlinear iterations.
+The nonlinear solve fails when it starts outside the barrier-feasible region or cannot find an acceptable line-search step. With hybrid soft mode disabled, the established hard-collider path still accepts the last feasible iterate at the configured Newton iteration budget. With hybrid mode enabled, a hard solve that reaches that budget reports non-convergence and is retried in soft mode; a soft solve reaching the budget is rolled back and retried at a smaller physical interval. Cancellation is checked during nonlinear iterations and between batches of the relative-motion sweep.
 
 ### 7.1 TOI-limited variable time steps and rollback
 
-The configured base substep count partitions each animation frame into nominal intervals. Inside a nominal interval, conservative advancement evaluates the collider trajectory together with the hair trajectory predicted from its current velocity and gravity, and computes a safe temporal fraction before contact. Its safety clearance preserves 10% of the clearance present at the beginning of that proposal, capped by the larger of four minimum gaps and one quarter of the barrier distance; it therefore remains positive without demanding clearance that an already-active contact does not have. The collision-checked hair prediction is also the Newton initial iterate. The collider, root constraints, implicit prediction, velocity update, and contact impulses all use that same fraction, so prescribed and simulated motion remain on one physical clock. The unconsumed portion is then proposed again instead of uniformly subdividing the whole frame.
+The configured base substep count partitions each animation frame into nominal intervals. Before conservative advancement, a linear-time GPU reduction measures the maximum free-node translation predicted by velocity and gravity. A proposal above `max(maximum rest element length, 4 * (radius + collider offset + barrier distance))` is reduced without entering the collider BVH. The moving sweep then runs in batches of 8,192 hair elements. Enumeration stops for an element at 512 candidate triangles; such an over-broad proposal is halved and retried rather than launching an effectively unbounded traversal.
+
+Inside an accepted-size proposal, conservative advancement evaluates the collider trajectory together with the hair trajectory predicted from its current velocity and gravity, and computes a safe temporal fraction before contact. Its safety clearance preserves 10% of the clearance present at the beginning of that proposal, capped by the larger of four minimum gaps and one quarter of the barrier distance; it therefore remains positive without demanding clearance that an already-active contact does not have. The collision-checked hair prediction is also the Newton initial iterate. The collider, root constraints, implicit prediction, velocity update, and contact impulses all use that same fraction, so prescribed and simulated motion remain on one physical clock. The unconsumed portion is then proposed again instead of uniformly subdividing the whole frame.
 
 Positions, velocities, and the collider pose are snapshotted before each accepted variable interval. A nonlinear failure restores only that interval and retries a half-sized span. A fatal error restores the complete frame snapshot. With a collider, the separately configured variable-time-step maximum bounds accepted intervals and local retry attempts; without a collider, the base partition is used directly. The Blender default is 8 base intervals and a maximum of 128; both fields accept explicit values up to 4096. Exhausting the budget or collapsing below the minimum temporal fraction returns an error and leaves the frame rolled back.
 
@@ -143,12 +146,26 @@ The state is infeasible when the gap is not greater than `minimum_gap`. For a fe
 ### 8.3 Continuous checks and contact impulses
 
 - Relative-motion conservative advancement sweeps both the predicted hair and animated collider and limits each proposed interval to a safe TOI before solving that interval.
-- Line-search CCD limits hair displacement against the current collider.
+- Line-search CCD limits hair displacement against the current collider. In soft mode, hair and collider directions are scaled together by the same trust-radius factor, and broad phase uses a BVH refitted to the exact swept collider direction rather than applying the largest collider-vertex direction as global padding.
 - Both checks ignore fixed-root elements and invisible-extension elements.
 - The post-solve normal impulse prevents a contacting hair point from retaining a velocity into the collider and transfers the collider's normal surface velocity to the hair.
 - Friction uses hair velocity relative to the animated collider surface velocity.
 - The friction impulse is bounded by the Coulomb coefficient and the larger of the normal collision impulse and an estimate of the barrier normal impulse.
 - Hair-hair and strand self-collision are not implemented.
+
+### 8.4 Experimental hybrid soft collider
+
+`collider_anchor_stiffness == 0` selects the established prescribed collider. A positive value enables the experimental hybrid mode and is interpreted as an area-density stiffness in N/m³. Each valid input triangle contributes one third of its initial area to each incident vertex. For collider vertex `i`, actual position `x_i`, animation target `x_i*`, and lumped area `A_i`, the added potential is
+
+`E_anchor = 1/2 * collider_anchor_stiffness * sum_i A_i ||x_i - x_i*||²`.
+
+The mode first tries the established prescribed moving-collider sweep for every proposed interval. If the full target motion is safe, the actual collider is set exactly to the animation target and the ordinary hard-collider nonlinear path runs. If that sweep would be TOI-limited, the collider is restored to its last actual state and all collider vertex translations become nonlinear unknowns for that complete proposed interval. If a sweep-safe hard nonlinear solve nevertheless fails because it begins outside the barrier, cannot complete its line search, reaches the Newton iteration budget, or otherwise reports non-convergence, the complete interval is rolled back and retried once in soft mode before the interval is halved.
+
+A soft attempt initializes every free hair node at the preceding feasible position rather than directly at its velocity-and-gravity prediction. The prediction remains the center of the implicit inertial potential, so velocity and gravity still drive the solve while the initial line-search state remains barrier-feasible. Fixed roots are advanced to the interval target as usual. Contact gradients are applied to the hair and, with opposite sign and triangle barycentric weights, to the three collider vertices. Hair and collider directions share one CCD-limited Armijo line search and the collider BVH is refitted for every trial state.
+
+The linear approximation deliberately remains block diagonal between the hair strand solve and independent collider-vertex 3x3 solves; hair-collider off-diagonal blocks and collider vertex-to-vertex blocks are omitted. The converged actual collider persists into following intervals and is included in checkpoints. `soft_collider_attempts` counts all soft nonlinear attempts, `soft_collider_retry_attempts` counts those entered after a failed hard solve, and `soft_collider_substeps` counts completed soft intervals. `collider_anchor_energy` and `collider_maximum_displacement` report the last evaluated state.
+
+This is a quasi-static escape mechanism, not a material soft-body model. Collider inertia, velocity state, membrane/stretch energy, bending energy, volume preservation, plasticity, and collider self-collision are absent. The only internal resistance is the spatially independent area-lumped anchor, so it permits local dents and does not preserve the shape of the body. Contact impulses update hair velocity only; actual collider motion is nevertheless used as the contact surface's relative velocity.
 
 ## 9. GPU-resident animation
 
@@ -165,7 +182,7 @@ There is no CPU simulation path.
 
 ## 10. Blender Extension behavior
 
-The Extension is a Japanese-language panel in the 3D View sidebar under the tab `髪`. It exposes source hair, collider, frame range, maximum element length, minimum dynamic length, fixed-root node count, base intervals and the variable-time-step maximum, Newton iteration limit, rollback-history length, cache path, and advanced material/contact parameters.
+The experimental Extension is a Japanese-language panel in the 3D View sidebar under the tab `髪3`. It has a separate extension ID, Scene property namespace, operators, and panel classes from Kami Hair Solver 2, so both versions can be enabled together. It exposes source hair, collider, frame range, maximum element length, minimum dynamic length, fixed-root node count, base intervals and the variable-time-step maximum, Newton iteration limit, rollback-history length, cache path, advanced material/contact parameters, and the soft-collider switch and anchor density.
 
 The prepare phase:
 
@@ -174,19 +191,17 @@ The prepare phase:
 3. allocates animation storage;
 4. evaluates and uploads all remaining frames on Blender's main thread;
 5. verifies stable hair and collider topology; and
-6. creates or replaces the separate result Hair Curves object.
+6. creates or replaces the separate result Hair Curves object and, when soft mode is enabled, a separate result collider mesh.
 
-The solve phase runs the native CUDA calculation on a worker thread. The UI reports upload progress, current frame, substep, nonlinear iteration, elapsed time, and an estimated remaining time. Escape requests cancellation. Blender data is not edited from the worker thread.
+The solve phase runs the native CUDA calculation on a worker thread. The UI reports upload progress, current frame, accepted and attempted intervals, sweep reductions, soft attempts, nonlinear iteration, elapsed time, and an estimated remaining time. It distinguishes sweep preflight, relative-motion sweep, line-search CCD, assembly, linear solve, and line search. Escape requests cancellation. Blender data is not edited from the worker thread.
 
-At every completed frame boundary, the Extension stores an opaque native checkpoint containing all internal generalized coordinates, rotations, velocities, and the current animation index. A bounded in-memory history retains `checkpoint_frames + 1` states; the extra state makes the configured number of backward frame steps available. Checkpoints are valid only for the same live, built CUDA solver.
+At every completed frame boundary, the Extension stores an opaque native checkpoint containing all internal generalized coordinates, rotations, velocities, the actual collider position, and the current animation index. A bounded in-memory history retains `checkpoint_frames + 1` states; the extra state makes the configured number of backward frame steps available. Checkpoints are valid only for the same live, built CUDA solver.
 
 On a failed solve, the panel reports the last completed frame, failed frame, CUDA phase, attempted variable intervals, TOI-limited attempts, configured base count and maximum, and the native exception. Moving-collider failures additionally report an offending strand, internal element, collider triangle, measured and required distance, safe collider displacement per interval and total frame displacement, and world-space detection coordinates. The complete prefix of the `.未完成` display cache is retained.
 
 The debug-resume box accepts an absolute resume frame inside the retained checkpoint range and provides failed-frame, -1, -5, and -10 shortcuts. Selecting frame `F` restores the complete state at the end of `F - 1`, truncates the incomplete display cache after `F - 1`, and recomputes from `F`. Numerical parameters can retry the same frame. Material and contact changes produce a recommendation to rewind at least one frame. Topology-defining changes are rejected and require a fresh bake. Parameter changes are recorded in the panel, and the calculation's initial parameter values can be restored.
 
 Successful completion and non-cancellation errors send a best-effort `PING` to `127.0.0.1:8765/UDP`. The extension does not wait for a reply and silently ignores notification failure.
-
-The removed collider-inspection-copy operator is not part of version 0.6.3.
 
 ## 11. Default parameters
 
@@ -207,8 +222,9 @@ The removed collider-inspection-copy operator is not part of version 0.6.3.
 | Maximum element length | `0.01` m |
 | Minimum dynamic length | `0` m (disabled) |
 | Fixed root nodes | 2 |
+| Collider anchor density | `0` N/m³ (native API disabled) |
 
-`thread_count` is present in ABI version 5 but is not used by the CUDA backend.
+`thread_count` is present in ABI version 8 but is not used by the CUDA backend. The Blender Extension exposes soft mode as an opt-in switch and uses `1e8` N/m³ as its initial anchor-density value when enabled.
 
 ### 11.2 Material and contact defaults
 
@@ -244,12 +260,14 @@ The supported Windows build writes the header with the layout `<8sIII` and write
 
 The bake writes to a sibling file with the suffix `.未完成`. The final cache path is atomically replaced only after every requested frame succeeds. On cancellation or error, the incomplete file and its complete frame prefix are retained for same-session resume; the previous completed cache is left untouched. Resume validates the header and byte length, truncates complete or partial data after the frame immediately preceding the selected resume frame, and appends recomputed output. The `.khc` stream stores display positions only; safe rewind is provided by the separate same-session opaque CUDA checkpoints. Frame-change playback applies only the finalized cache and only when the current frame is inside the cache header's inclusive range.
 
+Soft mode additionally creates `softコライダー_計算結果` and writes `<hair-cache>.soft-collider`. The sidecar header uses magic `KAMISC1`, the same inclusive frame range, and the collider vertex count, followed by three little-endian IEEE-754 32-bit coordinates per vertex per frame. It is display output rather than restart state; restart uses the opaque double-precision native checkpoint.
+
 ## 13. C API contract
 
-- Public ABI version: `KHS_ABI_VERSION == 5`.
+- Public ABI version: `KHS_ABI_VERSION == 8`.
 - Callers obtain defaults, create a solver, set hair and optional collider data, build, then either use per-frame updates or allocate/upload a full animation.
 - Full-animation frames must be uploaded completely before finalization and stepped in increasing sequential order.
-- Output APIs expose visible/original positions, all internal positions, and original-to-internal mapping.
+- Output APIs expose visible/original positions, all internal positions, original-to-internal mapping, and actual collider positions.
 - Build, step, GPU, and progress structures expose diagnostics and counters.
 - `khsGetLastError` returns the solver's most recent diagnostic string.
 - `khsRequestCancel` is cooperative and is observed during nonlinear solution.
@@ -257,23 +275,25 @@ The bake writes to a sibling file with the suffix `.未完成`. The final cache 
 - Animation checkpoint APIs return the required opaque byte count and save or restore a frame-boundary state in the same live solver.
 - Failure diagnostics identify moving-collider sweep failures and expose attempted variable intervals, TOI-limited attempts, and geometric detection data.
 
-Some ABI fields are reserved by the present implementation: `objective_change`, `friction_energy`, `peak_temporary_bytes`, and the assembly/collision/optimization timing breakdown are not populated with independent measurements in version 0.6.3.
+Some ABI fields are reserved by the present implementation: `objective_change`, `friction_energy`, `peak_temporary_bytes`, and the assembly/collision/optimization timing breakdown are not populated with independent measurements in version 0.7.2.
 
 ## 14. Failure behavior and limitations
 
 - Visible hair must begin outside the collider with a gap greater than `minimum_gap`; the solver does not project an invalid initial state outward.
 - Invisible extension is intentionally excluded from all collider contact and feasibility tests.
-- A sufficiently fast or deforming collider may exhaust the variable-time-step budget before completing a frame.
+- A sufficiently fast or deforming prescribed collider may exhaust the variable-time-step budget before completing a frame. Soft mode avoids some such failures but may itself fail to converge when the anchor/contact compromise has no feasible solution.
 - A difficult visible contact state may fail Gauss-Newton line search.
 - Resume is available only inside the bounded in-memory checkpoint range and while the Blender session and its GPU solver remain alive; reopening Blender requires a new bake.
 - Checkpoint memory is approximately two arrays of six doubles per internal node for every retained state. The panel reports an estimate for the configured history.
-- Although the Blender frame properties currently permit negative values, the version 0.6.3 cache header stores frame indices as unsigned 32-bit integers; attempting to bake a negative frame range fails during cache-header encoding.
+- Although the Blender frame properties currently permit negative values, the version 0.7.2 cache headers store frame indices as unsigned 32-bit integers; attempting to bake a negative frame range fails during cache-header encoding.
 - Hair-hair collision, self-collision, aerodynamic drag, wind, plasticity, cutting, remeshing during animation, and topology changes are not implemented.
 - Contact uses the closest collider triangle per rod element in an evaluation rather than assembling multiple simultaneous triangle contacts for that element.
 - The release has no CPU fallback and no binaries for architectures other than Windows x64 / `sm_120`.
 - Minimum dynamic length deliberately changes the dynamics of short visible hair and must be treated as an artist-selected surrogate parameter.
+- Soft mode is not a substitute for correcting an intersecting initial state. The first frame must still be feasible.
+- Soft fallback cost depends on the number of affected intervals and nonlinear/line-search iterations. Each active trial adds O(collider vertices) anchor, direction, position-update, and BVH-refit work.
 
-## 15. Version 0.6.3 verification record
+## 15. Version 0.7.2 verification record
 
 The following checks passed for the source represented by this specification:
 
@@ -281,9 +301,18 @@ The following checks passed for the source represented by this specification:
 - public C API test suite;
 - Blender Extension smoke test using Blender 5.2;
 - opaque CUDA checkpoint save/restore determinism and backward-cache truncation tests;
+- a prescribed-crossing regression in which hard motion stops but soft motion remains feasible, deforms the collider, reports a fallback interval, and reproduces the collider state bit-for-bit after checkpoint restore;
+- a hair-velocity crossing regression proving that a soft attempt begins at the preceding feasible hair state, plus a forced hard-failure regression proving that the same interval is retried in soft mode before temporal subdivision;
+- a hard Newton-budget regression proving that hybrid mode retries the interval in soft mode, and a large-predicted-motion regression proving that the sweep is reduced before any collider candidate traversal;
 - moving-collider failure diagnostics, explicit variable-time-step ceiling tests, a 20 cm moving-collider crossing regression using ordinary material values, an active-contact regression whose existing clearance is smaller than the maximum TOI safety clearance, and a multi-frame 0.44 mm/frame normal-velocity transfer regression using the Blender default material scale;
 - static intersection and moving-collider regression tests proving that invisible extension creates no collider candidates while visible contact tests remain active; and
 - Blender 5.2 extension packaging and installation smoke tests.
+
+The production-scene version-0.7.0 frame 1-to-2 comparison used 6,757 strands, 74,327 visible points, 265,108 internal nodes, 258,351 elements, and a 225,184-vertex body collider. Hard mode used 551,329,796 resident bytes and 266.468 ms GPU frame time. Soft mode with `1e8` N/m³ used 596,366,596 bytes and 260.504 ms. No fallback was needed in that frame, so the actual collider matched its target and the timing difference is measurement noise; the measured fixed memory cost was 45,036,800 bytes (42.95 MiB, 8.17%). Preparation wall time changed from 2.858 s to 3.002 s. This single-frame comparison measures the hybrid fast path, not the cost of an active soft fallback.
+
+In the production scene that originally failed at frame 13, version 0.7.1 with `1e8` N/m³ and a 64-iteration setting completed the frame in 164.10 GPU seconds. It accepted 31 variable intervals, of which 20 were soft, from 62 soft attempts. Maximum final collider displacement was 0.077 mm and minimum feasible gap was 2.25 µm. The preceding frames 11 and 12 took 31.64 and 66.59 wall seconds, compared with 12.07 and 17.89 seconds before feasible-start soft activation. This is the pre-0.7.2 reference measurement. With the original 32-iteration setting frame 13 still exhausted 128 interval attempts; 64 iterations were required for that recorded 0.7.1 case.
+
+The same scene was retested with version 0.7.2, 32 Newton iterations, eight base intervals, and soft density `1e8` N/m³. At the default maximum of 128 variable attempts, frame 13 terminated explicitly after about four minutes with 40 accepted intervals, nine sweep preflight reductions, 11 hard-Newton-budget soft retries, a 12.212 mm maximum prediction, and a 10.000 mm sweep limit. Raising only the maximum to 256 and resuming frame 13 in the same session completed through frame 18. The resumed frame-13-to-18 wall time was 20 minutes 08 seconds. Frame 18 passed the attempt number 45 where version 0.7.1 had remained in one CUDA operation for more than two hours; version 0.7.2 passed it in about 70 seconds and completed the frame in 176.28 GPU seconds with 45 accepted intervals from 125 attempts, 19 preflight reductions, 26,126,515 moving-sweep candidates, four successful soft intervals from 65 soft attempts, and 11 hard-budget retries. Its maximum predicted translation was 17.884 mm against the 10.000 mm guard. Comparison of the soft-collider display cache with animated targets found a peak displacement of 0.174 mm at frame 11 and target agreement to float-output precision at frame 18. This verifies bounded progress and parameter-only recovery, not low cost in severe-contact frames.
 
 The 0.6.2 worktree production scene used 6,757 strands, 74,327 visible points, 265,108 internal nodes, 258,351 elements, and a 225,184-vertex body collider. With the contact defaults adopted by 0.6.3, frames 1 through 30 completed in 6 minutes 36 seconds; the final GPU frame took 11.79 seconds and resident CUDA allocation was approximately 0.986 GiB on an RTX 5070 Ti. This is a stability record, not a performance guarantee.
 

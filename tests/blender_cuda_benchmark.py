@@ -33,7 +33,7 @@ def main():
 
     kami_hair_solver.register()
     scene = bpy.context.scene
-    settings = scene.kami_hair
+    settings = scene.kami_hair_3
     settings.hair = bpy.data.objects["カーブ"]
     settings.collider = bpy.data.objects["CC_Base_Body"]
     settings.frame_start = 1

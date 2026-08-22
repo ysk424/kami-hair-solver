@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define KHS_ABI_VERSION 5u
+#define KHS_ABI_VERSION 8u
 
 typedef struct KhsSolver KhsSolver;
 
@@ -55,7 +55,10 @@ typedef enum KhsProgressPhase {
     KHS_PHASE_CCD = 4,
     KHS_PHASE_LINE_SEARCH = 5,
     KHS_PHASE_FINISHED = 6,
-    KHS_PHASE_FAILED = 7
+    KHS_PHASE_FAILED = 7,
+    KHS_PHASE_SWEEP_GUARD = 8,
+    KHS_PHASE_MOVING_SWEEP = 9,
+    KHS_PHASE_LINE_SEARCH_CCD = 10
 } KhsProgressPhase;
 
 typedef struct KhsSolverDesc {
@@ -77,6 +80,11 @@ typedef struct KhsSolverDesc {
     double minimum_dynamic_length;
     uint32_t fixed_root_nodes;
     uint32_t thread_count;
+    /*
+     * 0 で従来の剛体コライダー。正値では各コライダー頂点をアニメーション
+     * 目標へ戻す面積集中アンカーばね密度 [N/m^3] として扱う（実験機能）。
+     */
+    double collider_anchor_stiffness;
 } KhsSolverDesc;
 
 typedef struct KhsHairMaterial {
@@ -115,6 +123,7 @@ typedef struct KhsBuildStats {
     uint64_t degree_of_freedom_count;
     uint64_t estimated_bytes;
     double initial_minimum_gap;
+    uint64_t soft_collider_degree_of_freedom_count;
 } KhsBuildStats;
 
 typedef struct KhsStepStats {
@@ -124,8 +133,19 @@ typedef struct KhsStepStats {
     uint32_t newton_iterations;
     uint32_t linear_solves;
     uint32_t line_search_evaluations;
+    /* ハイブリッド判定で実際にsoft連成へ切り替えた完了時間区間数。 */
+    uint32_t soft_collider_substeps;
+    /* soft連成を求解した総試行数（失敗試行を含む）。 */
+    uint32_t soft_collider_attempts;
+    /* hard非線形求解失敗を受け、同一区間をsoftで再試行した回数。 */
+    uint32_t soft_collider_retry_attempts;
+    /* CCD投入前の予測移動または候補上限により、区間を縮小した回数。 */
+    uint32_t sweep_guard_reductions;
+    /* hardのNewton上限到達を受け、softへ切り替えた回数。 */
+    uint32_t hard_iteration_limit_retries;
     uint64_t contact_candidate_count;
     uint64_t active_contact_count;
+    uint64_t moving_sweep_candidate_count;
     double initial_residual_norm;
     double final_residual_norm;
     double relative_residual_norm;
@@ -138,6 +158,10 @@ typedef struct KhsStepStats {
     double elastic_energy;
     double contact_energy;
     double friction_energy;
+    double collider_anchor_energy;
+    double collider_maximum_displacement;
+    double maximum_predicted_displacement;
+    double sweep_displacement_limit;
     KhsProgressPhase phase;
 } KhsStepStats;
 
@@ -172,6 +196,10 @@ typedef struct KhsProgress {
     uint32_t nonlinear_iteration;
     uint32_t nonlinear_iteration_limit;
     uint32_t cancelled;
+    uint32_t attempted_substeps;
+    uint32_t accepted_substeps;
+    uint32_t sweep_guard_reductions;
+    uint32_t soft_collider_attempts;
     double frame_elapsed_seconds;
 } KhsProgress;
 
@@ -234,7 +262,7 @@ KHS_API KhsResult khsBuild(KhsSolver *solver);
 /*
  * 構築済みソルバーの現在状態を保持したまま実行時パラメーターを更新する。
  * 内部メッシュ構造を決める maximum_element_length、minimum_dynamic_length、
- * fixed_root_nodes は構築時の値から変更できない。
+ * fixed_root_nodes と collider_anchor_stiffness の0/正値モードは構築時から変更できない。
  */
 KHS_API KhsResult khsUpdateRuntimeParameters(KhsSolver *solver,
                                               const KhsSolverDesc *desc,
@@ -285,6 +313,12 @@ KHS_API KhsResult khsCopyOriginalPositions(const KhsSolver *solver,
                                            KhsVec3 *positions,
                                            uint32_t capacity);
 KHS_API KhsResult khsCopyInternalPositions(const KhsSolver *solver,
+                                            KhsVec3 *positions,
+                                            uint32_t capacity);
+
+/* 現在の実コライダー頂点。剛体時はアニメーション目標、soft時は変形後位置。 */
+KHS_API uint32_t khsGetColliderVertexCount(const KhsSolver *solver);
+KHS_API KhsResult khsCopyColliderPositions(const KhsSolver *solver,
                                            KhsVec3 *positions,
                                            uint32_t capacity);
 KHS_API KhsResult khsCopyOriginalToInternalMap(const KhsSolver *solver,

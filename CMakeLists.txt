@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(kami_hair_solver VERSION 0.6.3 LANGUAGES C CXX CUDA)
+project(kami_hair_solver VERSION 0.7.2 LANGUAGES C CXX CUDA)
 
 if(WIN32 AND NOT MSVC)
     message(FATAL_ERROR "CUDA版はMSVC/Visual Studio 2022で構築してください")
@@ -78,13 +78,17 @@ add_executable(kami_hair_solver_c_api_tests tests/test_c_api.c)
 target_compile_features(kami_hair_solver_c_api_tests PRIVATE c_std_11)
 target_include_directories(kami_hair_solver_c_api_tests PRIVATE include)
 target_link_libraries(kami_hair_solver_c_api_tests PRIVATE kami_hair_solver)
+if(MSVC)
+    target_compile_options(kami_hair_solver_tests PRIVATE /utf-8)
+    target_compile_options(kami_hair_solver_c_api_tests PRIVATE /utf-8)
+endif()
 add_test(NAME kami_hair_solver_c_api COMMAND kami_hair_solver_c_api_tests)
 
 if(KAMI_BUILD_BLENDER_EXTENSION AND WIN32)
     set(KAMI_EXTENSION_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/blender_extension/kami_hair_solver")
     set(KAMI_EXTENSION_STAGE "${CMAKE_CURRENT_BINARY_DIR}/blender-extension/kami_hair_solver")
     set(KAMI_PACKAGE_DIR "${CMAKE_CURRENT_BINARY_DIR}/packages")
-    set(KAMI_PACKAGE "${KAMI_PACKAGE_DIR}/kami_hair_solver-${PROJECT_VERSION}-windows-x64.zip")
+    set(KAMI_PACKAGE "${KAMI_PACKAGE_DIR}/kami_hair_solver_3-${PROJECT_VERSION}-windows-x64.zip")
     file(GLOB KAMI_EXTENSION_FILES CONFIGURE_DEPENDS
         "${KAMI_EXTENSION_SOURCE}/*.py"
         "${KAMI_EXTENSION_SOURCE}/*.toml"

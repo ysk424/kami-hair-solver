@@ -94,8 +94,10 @@ public:
 
     uint32_t original_point_count() const { return static_cast<uint32_t>(input_points_.size()); }
     uint32_t internal_node_count() const { return static_cast<uint32_t>(nodes_.size()); }
+    uint32_t collider_vertex_count() const { return static_cast<uint32_t>(collider_current_.size()); }
     KhsResult copy_original_positions(KhsVec3 *positions, uint32_t capacity) const;
     KhsResult copy_internal_positions(KhsVec3 *positions, uint32_t capacity) const;
+    KhsResult copy_collider_positions(KhsVec3 *positions, uint32_t capacity) const;
     KhsResult copy_mapping(uint32_t *indices, uint32_t capacity) const;
     KhsResult build_stats(KhsBuildStats *stats) const;
     KhsResult step_stats(KhsStepStats *stats) const;

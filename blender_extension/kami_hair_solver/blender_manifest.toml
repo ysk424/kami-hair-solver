@@ -1,8 +1,8 @@
 schema_version = "1.0.0"
-id = "kami_hair_solver"
-version = "0.6.3"
-name = "髪"
-tagline = "CUDA Hair Curves非線形有限要素接触ソルバー"
+id = "kami_hair_solver_3"
+version = "0.7.2"
+name = "髪3・soft実験"
+tagline = "変形コライダーを試験するCUDA Hair Curves接触ソルバー"
 maintainer = "Kami Hair Solver contributors"
 type = "add-on"
 license = ["SPDX:GPL-3.0-or-later"]

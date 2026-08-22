@@ -43,7 +43,8 @@ bool valid_desc(const KhsSolverDesc *desc)
         desc->increment_tolerance > 0.0 && desc->minimum_line_search_step > 0.0 &&
         desc->minimum_gap > 0.0 && desc->maximum_element_length > 0.0 &&
         desc->minimum_dynamic_length >= 0.0 && std::isfinite(desc->minimum_dynamic_length) &&
-        desc->fixed_root_nodes > 0;
+        desc->fixed_root_nodes > 0 && desc->collider_anchor_stiffness >= 0.0 &&
+        std::isfinite(desc->collider_anchor_stiffness);
 }
 
 bool valid_material(const KhsHairMaterial *material)
@@ -95,6 +96,7 @@ void khsDefaultSolverDesc(KhsSolverDesc *desc)
     desc->minimum_dynamic_length = 0.0;
     desc->fixed_root_nodes = 2;
     desc->thread_count = 0;
+    desc->collider_anchor_stiffness = 0.0;
 }
 
 void khsDefaultHairMaterial(KhsHairMaterial *material)
@@ -252,6 +254,18 @@ KhsResult khsCopyInternalPositions(const KhsSolver *solver, KhsVec3 *positions,
 {
     if (!solver) return KHS_ERROR_INVALID_ARGUMENT;
     return solver->implementation.copy_internal_positions(positions, capacity);
+}
+
+uint32_t khsGetColliderVertexCount(const KhsSolver *solver)
+{
+    return solver ? solver->implementation.collider_vertex_count() : 0;
+}
+
+KhsResult khsCopyColliderPositions(const KhsSolver *solver, KhsVec3 *positions,
+                                   uint32_t capacity)
+{
+    if (!solver) return KHS_ERROR_INVALID_ARGUMENT;
+    return solver->implementation.copy_collider_positions(positions, capacity);
 }
 
 KhsResult khsCopyOriginalToInternalMap(const KhsSolver *solver, uint32_t *indices,

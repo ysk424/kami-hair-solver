@@ -544,10 +544,15 @@ KhsResult Solver::build()
     build_stats_.virtual_extension_strand_count = virtual_extension_strands_;
     build_stats_.virtual_extension_node_count = virtual_extension_nodes_;
     build_stats_.virtual_extension_rest_length = virtual_extension_rest_length_;
-    build_stats_.degree_of_freedom_count = free_dof_count_;
+    build_stats_.soft_collider_degree_of_freedom_count =
+        desc_.collider_anchor_stiffness > 0.0 ? 3ull * collider_current_.size() : 0ull;
+    build_stats_.degree_of_freedom_count =
+        free_dof_count_ + build_stats_.soft_collider_degree_of_freedom_count;
     build_stats_.estimated_bytes =
         nodes_.size() * sizeof(Node) + elements_.size() * sizeof(Element) +
-        collider_current_.size() * sizeof(Vec3) * 4 + collider_triangles_.size() * sizeof(Triangle);
+        collider_current_.size() * sizeof(Vec3) * 4 + collider_triangles_.size() * sizeof(Triangle) +
+        (desc_.collider_anchor_stiffness > 0.0 ?
+            collider_current_.size() * (sizeof(Vec3) * 4 + sizeof(double) * 10) : 0);
     build_stats_.initial_minimum_gap = has_collider_ ? current_minimum_gap() :
         std::numeric_limits<double>::infinity();
     step_stats_.phase = KHS_PHASE_IDLE;
@@ -564,9 +569,11 @@ KhsResult Solver::update_runtime_parameters(const KhsSolverDesc &desc,
     }
     if (desc.maximum_element_length != desc_.maximum_element_length ||
         desc.minimum_dynamic_length != desc_.minimum_dynamic_length ||
-        desc.fixed_root_nodes != desc_.fixed_root_nodes) {
+        desc.fixed_root_nodes != desc_.fixed_root_nodes ||
+        ((desc.collider_anchor_stiffness > 0.0) !=
+         (desc_.collider_anchor_stiffness > 0.0))) {
         error_ =
-            "再開中は最大要素長、最小動力学長、固定する毛根節点数を変更できません。"
+            "再開中は最大要素長、最小動力学長、固定する毛根節点数、softコライダーの有無を変更できません。"
             "これらを変更する場合は最初から計算してください。";
         return KHS_ERROR_INVALID_ARGUMENT;
     }
@@ -577,6 +584,11 @@ KhsResult Solver::update_runtime_parameters(const KhsSolverDesc &desc,
           material.barrier_distance > 0.0 && material.friction >= 0.0 &&
           material.friction_smoothing > 0.0 && material.collider_offset >= 0.0)) {
         error_ = "再開用の髪材料値が許容範囲外です。";
+        return KHS_ERROR_INVALID_ARGUMENT;
+    }
+    if (!(desc.collider_anchor_stiffness >= 0.0) ||
+        !std::isfinite(desc.collider_anchor_stiffness)) {
+        error_ = "コライダーアンカー剛性は0以上の有限値でなければなりません。";
         return KHS_ERROR_INVALID_ARGUMENT;
     }
 
@@ -768,6 +780,13 @@ KhsResult Solver::copy_internal_positions(KhsVec3 *positions, uint32_t capacity)
 {
     if (!built_ || !cuda_ || !positions || capacity < nodes_.size()) return KHS_ERROR_INVALID_ARGUMENT;
     return cuda_->copy_internal_positions(positions, capacity);
+}
+
+KhsResult Solver::copy_collider_positions(KhsVec3 *positions, uint32_t capacity) const
+{
+    if (!built_ || !cuda_ || !positions || capacity < collider_current_.size())
+        return KHS_ERROR_INVALID_ARGUMENT;
+    return cuda_->copy_collider_positions(positions, capacity);
 }
 
 KhsResult Solver::copy_mapping(uint32_t *indices, uint32_t capacity) const

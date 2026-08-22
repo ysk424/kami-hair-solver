@@ -290,6 +290,258 @@ void test_moving_collider_tunnelling_rejected()
     khsDestroy(solver);
 }
 
+void test_soft_collider_yields_instead_of_prescribed_crossing()
+{
+    KhsSolverDesc desc;
+    khsDefaultSolverDesc(&desc);
+    desc.gravity = {0.0, 0.0, 0.0};
+    desc.substeps = 4;
+    desc.maximum_substeps = 64;
+    desc.newton_iterations = 96;
+    desc.fixed_root_nodes = 1;
+    desc.maximum_element_length = 1.0;
+    desc.collider_anchor_stiffness = 10.0;
+    KhsSolver *solver = khsCreate(&desc);
+    assert(solver);
+    KhsHairMaterial material;
+    khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
+    material.radius = 1.0e-3;
+    material.young_modulus = 1.0e6;
+    material.contact_stiffness = 100.0;
+    material.barrier_distance = 2.0e-3;
+    material.mass_damping = 2.0;
+    const KhsVec3 points[]{{-0.2, 0.0, 0.02}, {-0.1, 0.0, 0.0},
+                           {0.1, 0.0, 0.0}, {0.2, 0.0, 0.02}};
+    const uint32_t offsets[]{0, 4};
+    const KhsVec3 below[]{{-1.0, -1.0, -0.1}, {1.0, -1.0, -0.1},
+                          {0.0, 1.0, -0.1}};
+    const KhsVec3 above[]{{-1.0, -1.0, 0.1}, {1.0, -1.0, 0.1},
+                          {0.0, 1.0, 0.1}};
+    const KhsTriangle triangle[]{0, 1, 2};
+    require(solver, khsSetHairCurves(solver, points, 4, offsets, 1, &material));
+    require(solver, khsSetColliderMesh(solver, below, 3, triangle, 1));
+    require(solver, khsBuild(solver));
+    KhsBuildStats build{};
+    build.struct_size = sizeof(build);
+    require(solver, khsGetBuildStats(solver, &build));
+    assert(build.soft_collider_degree_of_freedom_count == 9);
+    require(solver, khsAllocateAnimation(solver, 2));
+    require(solver, khsSetRootAnimationFrame(solver, 0, points, 4));
+    require(solver, khsSetRootAnimationFrame(solver, 1, points, 4));
+    require(solver, khsSetColliderAnimationFrame(solver, 0, below, 3));
+    require(solver, khsSetColliderAnimationFrame(solver, 1, above, 3));
+    require(solver, khsFinalizeAnimation(solver));
+    std::vector<unsigned char> checkpoint(khsGetAnimationCheckpointSize(solver));
+    assert(checkpoint.size() >= 3 * sizeof(KhsVec3));
+    require(solver, khsSaveAnimationCheckpoint(solver, checkpoint.data(), checkpoint.size()));
+    const KhsResult soft_result = khsStepAnimationFrame(solver, 1, 1.0 / 24.0);
+    if (soft_result != KHS_OK) {
+        KhsStepStats failed{};
+        failed.struct_size = sizeof(failed);
+        require(solver, khsGetLastStepStats(solver, &failed));
+        std::fprintf(stderr,
+                     "soft crossing failure: %s sub=%u newton=%u line=%u active=%llu "
+                     "gap=%.12g residual=%.12g relative=%.12g increment=%.12g alpha=%.12g "
+                     "deformation=%.12g anchor=%.12g\n",
+                     khsGetLastError(solver), failed.substeps, failed.newton_iterations,
+                     failed.line_search_evaluations,
+                     static_cast<unsigned long long>(failed.active_contact_count),
+                     failed.minimum_gap, failed.final_residual_norm,
+                     failed.relative_residual_norm, failed.increment_norm,
+                     failed.accepted_step_length, failed.collider_maximum_displacement,
+                     failed.collider_anchor_energy);
+    }
+    require(solver, soft_result);
+    KhsStepStats stats{};
+    stats.struct_size = sizeof(stats);
+    require(solver, khsGetLastStepStats(solver, &stats));
+    assert(stats.phase == KHS_PHASE_FINISHED);
+    assert(stats.soft_collider_substeps > 0);
+    assert(stats.soft_collider_attempts >= stats.soft_collider_substeps);
+    assert(stats.soft_collider_retry_attempts == 0);
+    assert(stats.minimum_gap > desc.minimum_gap);
+    assert(stats.active_contact_count > 0);
+    assert(stats.collider_anchor_energy > 0.0);
+    assert(stats.collider_maximum_displacement > 0.0);
+    assert(khsGetColliderVertexCount(solver) == 3);
+    KhsVec3 actual[3];
+    require(solver, khsCopyColliderPositions(solver, actual, 3));
+    assert(actual[0].z < above[0].z - 1.0e-5);
+    require(solver, khsRestoreAnimationCheckpoint(solver, checkpoint.data(), checkpoint.size()));
+    require(solver, khsStepAnimationFrame(solver, 1, 1.0 / 24.0));
+    KhsVec3 repeated[3];
+    require(solver, khsCopyColliderPositions(solver, repeated, 3));
+    for (int i = 0; i < 3; ++i) {
+        assert(std::abs(repeated[i].x - actual[i].x) < 1.0e-14);
+        assert(std::abs(repeated[i].y - actual[i].y) < 1.0e-14);
+        assert(std::abs(repeated[i].z - actual[i].z) < 1.0e-14);
+    }
+    khsDestroy(solver);
+}
+
+void test_soft_collider_starts_from_feasible_hair_state()
+{
+    KhsSolverDesc desc;
+    khsDefaultSolverDesc(&desc);
+    desc.substeps = 1;
+    desc.maximum_substeps = 64;
+    desc.newton_iterations = 96;
+    desc.fixed_root_nodes = 1;
+    desc.maximum_element_length = 1.0;
+    desc.collider_anchor_stiffness = 10.0;
+    KhsSolver *solver = khsCreate(&desc);
+    assert(solver);
+    KhsHairMaterial material;
+    khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
+    material.radius = 1.0e-3;
+    material.young_modulus = 1.0e6;
+    material.contact_stiffness = 100.0;
+    material.barrier_distance = 2.0e-3;
+    material.mass_damping = 2.0;
+    const KhsVec3 points[]{{-0.2, 0.0, 0.01}, {-0.1, 0.0, 0.01},
+                           {0.1, 0.0, 0.01}, {0.2, 0.0, 0.01}};
+    const uint32_t offsets[]{0, 4};
+    const KhsVec3 plane[]{{-1.0, -1.0, 0.0}, {1.0, -1.0, 0.0},
+                          {0.0, 1.0, 0.0}};
+    const KhsTriangle triangle[]{0, 1, 2};
+    require(solver, khsSetHairCurves(solver, points, 4, offsets, 1, &material));
+    require(solver, khsSetColliderMesh(solver, plane, 3, triangle, 1));
+    require(solver, khsBuild(solver));
+    require(solver, khsStep(solver, 0.05));
+    KhsStepStats stats{};
+    stats.struct_size = sizeof(stats);
+    require(solver, khsGetLastStepStats(solver, &stats));
+    assert(stats.phase == KHS_PHASE_FINISHED);
+    assert(stats.soft_collider_attempts > 0);
+    assert(stats.soft_collider_substeps > 0);
+    assert(stats.minimum_gap > desc.minimum_gap);
+    KhsVec3 actual[3];
+    require(solver, khsCopyColliderPositions(solver, actual, 3));
+    assert(actual[0].z < plane[0].z || actual[1].z < plane[1].z ||
+           actual[2].z < plane[2].z);
+    khsDestroy(solver);
+}
+
+void test_soft_collider_retries_failed_hard_solve()
+{
+    KhsSolverDesc desc;
+    khsDefaultSolverDesc(&desc);
+    desc.gravity = {0.0, 0.0, 0.0};
+    desc.substeps = 1;
+    desc.maximum_substeps = 1;
+    desc.newton_iterations = 96;
+    desc.minimum_line_search_step = 0.5;
+    desc.fixed_root_nodes = 1;
+    desc.maximum_element_length = 1.0;
+    desc.collider_anchor_stiffness = 10.0;
+    KhsSolver *solver = khsCreate(&desc);
+    assert(solver);
+    KhsHairMaterial material;
+    khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
+    material.radius = 1.0e-3;
+    material.young_modulus = 1.0e8;
+    material.contact_stiffness = 100.0;
+    material.barrier_distance = 2.0e-3;
+    material.mass_damping = 2.0;
+    const KhsVec3 points[]{{-0.2, 0.0, 0.002}, {-0.1, 0.0, 0.002},
+                           {0.1, 0.0, 0.002}, {0.2, 0.0, 0.002}};
+    KhsVec3 targets[4]{points[0], points[1], points[2], points[3]};
+    targets[0].z = -0.05;
+    const uint32_t offsets[]{0, 4};
+    const KhsVec3 plane[]{{-1.0, -1.0, 0.0}, {1.0, -1.0, 0.0},
+                          {0.0, 1.0, 0.0}};
+    const KhsTriangle triangle[]{0, 1, 2};
+    require(solver, khsSetHairCurves(solver, points, 4, offsets, 1, &material));
+    require(solver, khsSetColliderMesh(solver, plane, 3, triangle, 1));
+    require(solver, khsBuild(solver));
+    require(solver, khsUpdateRootTargets(solver, targets, 4));
+    const KhsResult result = khsStep(solver, 1.0 / 24.0);
+    assert(result == KHS_ERROR_NOT_CONVERGED);
+    KhsStepStats stats{};
+    stats.struct_size = sizeof(stats);
+    require(solver, khsGetLastStepStats(solver, &stats));
+    assert(stats.soft_collider_attempts == 1);
+    assert(stats.soft_collider_retry_attempts == 1);
+    assert(stats.soft_collider_substeps == 0);
+    khsDestroy(solver);
+}
+
+void test_soft_collider_retries_hard_iteration_limit()
+{
+    KhsSolverDesc desc;
+    khsDefaultSolverDesc(&desc);
+    desc.gravity = {0.0, 0.0, 0.0};
+    desc.substeps = 1;
+    desc.maximum_substeps = 1;
+    desc.newton_iterations = 1;
+    desc.fixed_root_nodes = 1;
+    desc.maximum_element_length = 1.0;
+    desc.collider_anchor_stiffness = 10.0;
+    KhsSolver *solver = khsCreate(&desc);
+    assert(solver);
+    KhsHairMaterial material;
+    khsDefaultHairMaterial(&material);
+    material.collider_offset = 0.0;
+    material.radius = 1.0e-3;
+    material.young_modulus = 1.0e8;
+    material.barrier_distance = 2.0e-3;
+    const KhsVec3 points[]{{-0.2, 0.0, 0.1}, {-0.1, 0.0, 0.1},
+                           {0.1, 0.0, 0.1}, {0.2, 0.0, 0.1}};
+    KhsVec3 targets[4]{points[0], points[1], points[2], points[3]};
+    targets[0].y = 0.05;
+    const uint32_t offsets[]{0, 4};
+    const KhsVec3 plane[]{{-1.0, -1.0, -1.0}, {1.0, -1.0, -1.0},
+                          {0.0, 1.0, -1.0}};
+    const KhsTriangle triangle[]{0, 1, 2};
+    require(solver, khsSetHairCurves(solver, points, 4, offsets, 1, &material));
+    require(solver, khsSetColliderMesh(solver, plane, 3, triangle, 1));
+    require(solver, khsBuild(solver));
+    require(solver, khsUpdateRootTargets(solver, targets, 4));
+    assert(khsStep(solver, 1.0 / 24.0) == KHS_ERROR_NOT_CONVERGED);
+    KhsStepStats stats{};
+    stats.struct_size = sizeof(stats);
+    require(solver, khsGetLastStepStats(solver, &stats));
+    assert(stats.soft_collider_retry_attempts == 1);
+    assert(stats.hard_iteration_limit_retries == 1);
+    assert(stats.soft_collider_attempts == 1);
+    khsDestroy(solver);
+}
+
+void test_predicted_motion_guard_prevents_unbounded_sweep()
+{
+    KhsSolverDesc desc;
+    khsDefaultSolverDesc(&desc);
+    desc.gravity = {0.0, 0.0, -1000.0};
+    desc.substeps = 1;
+    desc.maximum_substeps = 1;
+    desc.fixed_root_nodes = 1;
+    desc.maximum_element_length = 1.0;
+    KhsSolver *solver = khsCreate(&desc);
+    assert(solver);
+    KhsHairMaterial material;
+    khsDefaultHairMaterial(&material);
+    const KhsVec3 points[]{{0.0, 0.0, 0.0}, {0.0, 0.0, -0.1},
+                           {0.0, 0.0, -0.2}};
+    const uint32_t offsets[]{0, 3};
+    const KhsVec3 plane[]{{-1.0, -1.0, -10.0}, {1.0, -1.0, -10.0},
+                          {0.0, 1.0, -10.0}};
+    const KhsTriangle triangle[]{0, 1, 2};
+    require(solver, khsSetHairCurves(solver, points, 3, offsets, 1, &material));
+    require(solver, khsSetColliderMesh(solver, plane, 3, triangle, 1));
+    require(solver, khsBuild(solver));
+    assert(khsStep(solver, 1.0 / 24.0) == KHS_ERROR_NOT_CONVERGED);
+    KhsStepStats stats{};
+    stats.struct_size = sizeof(stats);
+    require(solver, khsGetLastStepStats(solver, &stats));
+    assert(stats.sweep_guard_reductions == 1);
+    assert(stats.maximum_predicted_displacement > stats.sweep_displacement_limit);
+    assert(stats.moving_sweep_candidate_count == 0);
+    khsDestroy(solver);
+}
+
 void test_moving_collider_uses_variable_toi_steps()
 {
     KhsSolverDesc desc;
@@ -516,6 +768,11 @@ int main()
     test_initial_intersection_rejected();
     test_barrier_contact_remains_feasible();
     test_moving_collider_tunnelling_rejected();
+    test_soft_collider_yields_instead_of_prescribed_crossing();
+    test_soft_collider_starts_from_feasible_hair_state();
+    test_soft_collider_retries_failed_hard_solve();
+    test_soft_collider_retries_hard_iteration_limit();
+    test_predicted_motion_guard_prevents_unbounded_sweep();
     test_moving_collider_uses_variable_toi_steps();
     test_moving_collider_preserves_small_existing_clearance();
     test_moving_collider_transfers_normal_velocity_to_hair();
